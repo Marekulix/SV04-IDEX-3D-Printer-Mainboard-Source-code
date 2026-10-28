@@ -1,0 +1,77 @@
+# SV04 NEXT Phase 10.27; HOST-ONLY; no 3D printer hardware access.
+# Independent safety state-machine tests. No firmware binary is created.
+name: SV04 NEXT 10.27 Auto60 Host Safety - NICHT FLASHEN
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auto60-host-safety:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Read-only OEM Marlin checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Guard OEM sources and baseline configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          sha256sum Marlin/Configuration.h platformio.ini | tee evidence/CONFIG_SHA256.txt
+          test "$(sha256sum Marlin/Configuration.h | cut -d' ' -f1)" = "c9a5bffe15df624d33a6cad03661955d1a11d291c8f1ad45966fa913a987c665"
+          test "$(sha256sum platformio.ini | cut -d' ' -f1)" = "9c2938dee97e41cd76919628ba74588e91b3313eecb3626df50e1cddd229f02c"
+          test "$(git hash-object Marlin/src/gcode/bedlevel/abl/G29.cpp)" = "02df6e4c8d017cf4dd1d4c9e6986a8967a317a8b"
+          test "$(git hash-object Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp)" = "2a63c281c8d8861e9780997df60e82becaa02805"
+          printf 'Original OEM code matches checked baseline.\n' | tee evidence/OEM_GUARDS.txt
+
+      - name: Build host-only safety sources from verified payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_PAYLOAD'
+          import base64, gzip, hashlib, pathlib
+          payloads = {
+              'include/SV04NextAuto60Safety.hpp': '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',
+              'tests/test_auto60_safety.cpp': 'H4sIAAAAAAAC/81YbU/rNhT+3l9h4EsyQnF6aXeXFqSKgYq2FXTLribdochNnMYiiXtjBy5D/e87TtI2DW1IGEj70jru8Xl9/JzTHLDICRKXov12+zhfH0++4pMx/SGHieQ9PCEelU9tfz7fbx0sxQcOEYLG8qy4FRLpFzcYFzKmJCzuBSxkUpy1Wolg0QwN0SkSD/gkAnOWVTTYbwlJJHNQEgk2i6iLHJ869wIO4H7rwKUeiyg6H12c/6b90JHL0TPKfILHPjo8zMT7aIEefRZQpGG9tdQ5ROCX+2RLbs9jPqWajp5bCLZJH74ypaQNwqBNxgk1tnzoelFW0nBOYyKTmGo93Mae0e0an/Cm0JTOWGT7PITQtc2fsk0bgmLCp65WZStTE1LhbxWLKXgRqVAWhYAdHs4DKml2bhUvpLOcCqXD4zHSVplnp7iP2GBoWfc3nEVSqPyyTMfarfS4LYiyo2V2bYCJHCRw5LMtzzSmGwi3TYy9Q/YTJAmbXtn5t6jr7Fa3KKRtmQHXnqdBaPrpqdnbyOxaJLObyuANEZW+XWUyXi0H2EUhYVFegCyBOeyWNvZImwQBf7TDLsbaZlr2lqj0SCAqjK799UgSSBUGVO9SrS3rz0jAFZsoPfprhhcZGNZYCJlQN1chIl8OugoO+YNejmnKeYC8gMzEt+4doO15V7YW/Vws13R3msa4PfpUEN8Z+RFzteqsVp9Wq5O7clIUnGielIlaq9wASbirmNdRNKKDgqdFRhDStawoCWkMIM4ocOAFnMgzy/qeMCrtMRlrAOcOBkjXKOFV9EAC5t6ubXyQ572uAT5h/YPUdz8bZgebRp2YRxQKFd+ykPJEvpc/ZeYGzjY6v9TAi/JG4b1ambnqAZXKvigKvuTxKO0CtS7le8d9gjNXq5pVwaet/WpNSnXKmWrYde229aVKJsclizEPgilx7u2YhGnPs2MKVy0GX3W9Ad1utCEAaiOmvVGHrxN57V3HLo2buvhqRipchYqqKaSxt19INKPvYD2dgRoBIjXfBA+7x4Xc/G4OeiHdeUOqfmWCzGJKQxrJZne2eTRVk9LWqcUse9R4cKlMwB+g7SpaWm4QYZPJ8i3DoGegNA5UDOTdFC2qyKG3/SA6PkYRR9C0jrh3NOVJ5AqUEtc3s3f3XyikDs5Kc/9mYXcSXzqweGQqVMqUq/Y/8P/pSIVnevpADdtqseFMeoYJBTHob+tzMGOXAZX1Fmg/ggnZgI9Jm1LIObAlebJ98kBtx1d85b6Qy3Xb2fSdA74s9ADzmPcE9XvYIbClVZ8XIV/wuUm/qQ6iUQVfyeSLNKSMXIfgsoMFOm5eg8b97c2R1qr3XqngdVNxkYb7VR1lDhAGj/4HWQHWJ5FDA60GYlPBssPV16wJmrcVpl4v+JAglOmUihxgXDQYoH31PguNL/66RSY0+p8ttK+289dJSgD5XEgk0vdO+UskqLJAN8PJpI3GHPkkdh9JTJED5gRsXZ2PbtHl78PJ6GLc/jvaV3/u/wWMek56TBMAAA==',
+          }
+          expected = {'include/SV04NextAuto60Safety.hpp': 'cd6bdc5581941bbb685e20cf783db8511d16ff08a7cf23b67af4493d29830bc3', 'tests/test_auto60_safety.cpp': 'f87a500cd59c11b5734850df9b5e9f8dde3695a657e92a44cdc4a2096d2eef21'}
+          for name, encoded in payloads.items():
+              data = gzip.decompress(base64.b64decode(encoded, validate=True))
+              digest = hashlib.sha256(data).hexdigest()
+              if digest != expected[name]:
+                  raise RuntimeError('Payload checksum mismatch: ' + name)
+              path = pathlib.Path('sv04-next-phase1027') / name
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(data)
+              print(name, digest)
+          PY_PAYLOAD
+
+      - name: Host C++11 debug, sanitizer and optimized tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          SRC=sv04-next-phase1027/tests/test_auto60_safety.cpp
+          g++ -std=c++11 -O0 -Wall -Wextra -Werror -pedantic "$SRC" -o /tmp/sv04-safe-debug
+          /tmp/sv04-safe-debug | tee evidence/debug.log
+          g++ -std=c++11 -O0 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer "$SRC" -o /tmp/sv04-safe-sanitized
+          /tmp/sv04-safe-sanitized | tee evidence/sanitizers.log
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic "$SRC" -o /tmp/sv04-safe-optimized
+          /tmp/sv04-safe-optimized | tee evidence/optimized.log
+          sha256sum sv04-next-phase1027/include/SV04NextAuto60Safety.hpp sv04-next-phase1027/tests/test_auto60_safety.cpp > evidence/SOURCES_SHA256.txt
+          git status --porcelain > evidence/GIT_STATUS.txt
+          printf 'HOST-ONLY; M190/G28/G29/M500 not executed; no firmware.bin; NICHT FLASHEN\n' > evidence/NICHT_FLASHEN.txt
+
+      - name: Archive evidence (never firmware)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04-NEXT-10-27-HOST-SAFETY-NICHT-FLASHEN
+          path: evidence/
+          if-no-files-found: warn
