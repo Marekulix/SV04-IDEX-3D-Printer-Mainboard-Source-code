@@ -1,0 +1,73 @@
+name: SV04 NEXT - experimenteller Marlin-Build NICHT FLASHEN
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sv04-next:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Original Marlin auschecken
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Python installieren
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Experimentelle Dateien nur im CI-Runner erzeugen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, gzip, pathlib
+          files = {
+              'integration/apply_sv04_next.py': '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',
+              'integration/SV04NextBedAudit.hpp': 'H4sIAAAAAAAC/5VWbXPTOBD+nl+xDDMlgSR1S+lB03JToLzMQNuhPQbui0ex14kOR/JJcppQ+t9vV7KduClwZCaJLO/rs6/3CyMmMwFaJdjZfggXn6I9OD35fAk70XDnjwH/PjuAVIqJ0tbJZKBVvgSpHE6McFKrYQcewqmGKdKjmvRhqmf+vzB67A9/D3SWWXSQTIWaoAVt4OTk/OPZB9AFBinWi3mnwE2RONGicpBJM7sSBuH0DBKdIggzs0QhLcy0kk6bA8jlHOHN7jOwTiwtnJ188JKOwaDIQZHwOfbpYS7xClMWneVyMnVAQgz+W0pDt2PMNKkRaskqur0N/17qYmk82260u7+GEjn5DyZuyAiQqUYotxyRvZfw+v3xxVs4Pic/P528YinbnftSJXlJjhxal5KO4fR5p6PEDG0hEgQ7j/YULhxcd6wzZeLgBabnjcXXHYCx1jnINCefHM48eqXBmJwf891Yu2ksU1zEhTBfMe3DTCRTqTCeo5GZxHREQrJcC0dOp3GCuZWl7cO3OMRo1LkZdZJcWMu6j8tUst6iHOcyOSBWVOUMLpxwCNcULpEEfF+Kguzw0T6nNHmrZ/iXqlX24ZPIZUo86Tt1IWdl7oHtw0dk7Aj/G7aq1kfwH3A0HcbdWkOPHbFf425Ep0SXyoUjkRlXmc43cH1DkoJ9XgQJSyi7yAmKNpmoKskjYMKSYvA0dkHiJmlQtCLd2SdatmOT1FsXKH2IOI0CSSuEW0XPhxFAZtANpsC9owZJ+P4d7hVDDnB13IwyvfAS+EMEt0Ne8d2Oe4srk1Q9GBsuxy6JWM+EJ0+HUdaH/V366/2Mq06ZPgyeeBb+7ZF/FcRw1AR4VMOUidxigAnawSPqlciRfx/gpxfRKOAbjo30JukCeaWCCgf5gnXMtaSS1xS6Ln1h0efChmW/qoBv/aqebJyapSnV6jkT5eLuUDVae5XGUUO0gEOIGP8FPD+CPT4t66tlc9Voqx5Y1Y9xJhsHjz28j38Jbw1sSLwmY8dUw0fNY3enhMND6C6pre3BI1j0eisPAsxbzPK/NAX670fMMIJHj6qKWYd/svssRpV2PbJKxzwWMEZjtKngprexTYwsXHwlCBxJ3dAlU0x/KwDb23CsKL5zzUXwZvcpfP4CQSz3eqUdN2ud0fyg0IchBbZMEsQU02GdkcHftp2wtfVjI/lllZ2UnovX9CmbWPoPEdSpfAQ7+/DnHT2SWl6DcYUeOfT27OISLk/o5+z0/ZcDHo40prw31WiDROT5WCRfOegqdFOnmdAiVVvieLAGmG3ovFTrBaknADDEZBHzOa2CsWw9BRCs0zQ7+22vWh9PnOMcc0KVws19Km3KrK5xpa/uDukmHr12x2h47lXW+i63XDuvW+ovblvzkxJbs6/dzFo8CoW5RdvqYL/Z+gLZnZPxh/2MUuIVOTXmgYAwFSYlSbrgtsZ7BWc0gdQEOiQA8Ab1YKJ1+qDJBRopM+ni2ZMo2pxla5auE2e0FUx/Su3rnXc3ItYmXi2NttvCpp52rba+3u1vOoWRc6LmlYPZZBJMacUtZFdWp1mu69NU1mlW28iVl3EhZtyGcx2Oh0dEWmO7rsaHOsgStdBxLTP4Hy5TmZFsEPAcxlTXAgb0f0DfAYhWFD0h6YuGURTtZLXStU3Fd83WltHcNCtKvNreWqnntzapKN1xtbZt8VgX1UZ1XfvXvBZNZgoGvOL2IdQq5q5Na+k0/vX0bI3O1dxc0z4MQkgAMRNbzeGJyfa7lAfbQofyXdraSkXVhW+PiXV99cxpGDd5WO0NF9Tm+t35D4L1SuwVDQAA',
+              'integration/SV04NextResources.hpp': 'H4sIAAAAAAAC/31Ta2/TQBD87l8xtBJK00fclkQioUiUlFKJpBVURQih6Gxv4qOXO+sebqHqf2cvDimU0C/W3XpmdmfH3qysmM0FjM4p6bRxUQpH2E/3DtLd+Nzv4+PJm+Hu+fjDFww/n43hTchLmMyRrYWXRkPoAqdk50JDiYyU20vQxtBgfH4Ja4InaLppiC63RBpXF47vmJsosIPTg5cwFqNumi64Y4Pc6Km0cyqaru9HZ6is+U65j8ioVwsrRaYIoigsOUcOohZSxVpU6SSbUucqFIRXzhdS+73ydaLFnFwlcoKr0xeabj3uklwJ5zC8kfoyDnn+h7m7pAqZknk/wVpAawt9tu38pK4mrXRrB1ST9i6ecXfPrNrIAtp4agWe4fBg4lFXO4iX/R5fOu1aqEDtDuMZjpUajhg4WJTkFK2lLp4dodftHnbDFra3l8WIir1WHZYaPB0v0rFHWPLB6pX4YIVfDNHo/Av/rb9Adzq4LHnfFSdRczKM9dYoThOF4fWzSdCtZP4P8hwBMsNvMyp66WSR/kQEXxorf1LxsAz2X0XzjzpPhXIU+1ZW8qqpv8bewvcjD1y7HyRSK6lpfaTPm1nMXyHG1TvPt3w9ycRWy9H4fJ8swc3UeSksrpuf4Dj6/fqN09s4Ju9rLvLXGfQMvRRvNwb/Z15Yqvij1rOGfWVsRpakZ+5TtBEJFx5oI+5WBX3tn+KMjf8kOMOGMpZ56THjH4P4RPZJ6jsRlH9oNaVSkd2IK/kFiuEFAk0EAAA=',
+              'tests/test_host.cpp': 'H4sIAAAAAAAC/71VbU/bMBD+3l/hFW0ko02TQju1JUygTYMvBVGGJk1TZOJL65I4ke2UZIj/vnPTMgp0nSaGIlnK3fl57t1bXIRxzoDUHafFhYaxpJqnojW6dPeGUOgjYIc549qZZFm9trXJ/BxUmssQ1CP7/ZAqBVIfPBQpzXh6UMsVF2MiaAIqoyEQNXP3BGINashAEsqFZZPbGiFLXwgd4F8FaFFHaarBsn1/qe/3TwQNNZ+B/cDwDXUykAnXQdJxXcuudE6WIovlNvBz2lEjorGC6rRXWMI0Rztkce0BabVIRHmsSBinChhBFY8xBMNJKJKIceXvmYQo5uOJJpkE/1bLHBqPjq7ruFGj6TmeG92tUCKQhdcqT6NUEsskpPTdQbm/Nyh3duzf0ilKpyidGqlJFiFGXPjl2/bHaX+3OR3MhcuAi0aJAXvR+/JJyHfPhu11ybt3eD2h6tr8dzud3c4ih+N2LwDBrPug7E0FOkuVPk4T+CpmIHnEgW0u1b1O8SSPEZIFGcJMEMZ6LrGYUrcX2Rt9OYcphHrpgSNBgQ4wsQHjdCyQgYfKsv+5MgVKC5QWRvo4/U/7bWHgNdrPGJjGk5CBCZ4kQFUuIQEk4YqIVJP0mpYvFi0G6GhIsBJUI0+AYFcx+HNXVguyko71mOsQTbXWp3eZkaZnZnT9gP6Hyq5sh6qpXp+413vVmF+4mzethr8eZdyOm0f5ksacGbgTMaqQ8XH682Z5qoliqiaLpfPphouLNA8np1doNZvjEWY0zMGBA8st2h5WiHgPWZiDEDqYZfP3Ym5hlidzYIbDqubrdMUr5lwB67qBNlQBzTETkv8EtoBfCfz6C7pJxZG58N394fvbR9sGfSEfpnpEZ8Aq1XC7GuUcWevmkW4OP3+7IB5W60MTz7ZHjk9HF0TRCHRJNCit+uTscDQi1oRKdkMlzDeL0WBT1RHurvYLPreBSTYIAAA=',
+              'tests/test_overlay.py': 'H4sIAAAAAAAC/61V227bOBB991cQzgMlrCv5kjq2Cz1knTQNkKRBbOwWSA2CpkY2a4rUkpQbp9h/36Ecp910uxdgDT+Iw5nDmTNnyHa7PSvNBl55cJ44U1sBxGzBKr4jP5GCS/VKKOMgJ6ua29yRz9KvTe2JBsilXpEL6d/VSyI18WvpiDDac6nBJu12uyXLylhPjDt8ud3zp4eyKqSCVmFNSSru10oizn7zFpf7jVpLH5JLSiM2h230FusWgiUhLpHagfVRt+O8jUJoxFiAZixOLDijthDF6GpBe3ffW6RUag8ry700msbx/iReVWrH3LZ7zDQ8+MNZjbnVuiAZoZQeSS1UnQNpJ0mK/99qqCFZtz/qR7blqgZ3z5cqKcGtp6bWPnlYvDDsFoj0+OajJiRN5+d3Nyx6dzpjZ79e3rDzwS999vPp7HLaIY1haspKgYf8CragkO8ojt9gGq2rl+lcTc/Y3XzWpEKIwzaJdTRdg9hsYBcH25cQ18qhINhfWeyieNJq2vncimQOoWZud2fSgvDGohPhjlhjPDqTJXeQNQQHS4yWwtimdx1nRRDBfUSvucVMUzSkK2FySJeQq5B+ikSkF/1xIqqKdi7iDsZ/9/tTvBJ5CoNtPxUWuJJ+lx7KbCCu/gFianQhV/W+z8madugRlo/qJBd3l2fs+vQDu31/eTOfsQ/kmP4IrFLcY5mlNCg0iSCIwWvlGeitwzbM5teD/tted3B3Ph+yQ6Y0XgTGSJUF0tLA0ZvqSYNJucmljZ4Emc1tDR14kM4zs2lWMbp+ttID86jECKkIXDe9aqQf0RdiTVbSs6UyS9pxMgcGRYH9yxQvlzkn1eQLPfA+od1+XgzhWIzybu9EFMd53suPxRiG49GQj8bDEz7onfARQtFv2Z7QPh8ORH/Uw8jRaNiD8cmoOx6fIFoXRv0lCM67/VH3Nf39vko0L2ERNxRYCIOUNSlHgY3Of57RTkMi3SMln1wYW4TmLgw+0cY/HXJPy9fdLuM1XlJWPu6DF+i5yqI9xL9TZ8iJ53v2vzlolYgwwxE1mq36YxammlUGM6VxlvUI1/l3PhZ8bXXY7yOQ+os8/l7lP0iFelOLNTNLXG2bOpE+JAJoGEOFjkfklDjACzlHy9aIxomUtQtkfUJ54I0NhCsPFq93pGslNVcuCVON9z7k2VtcAi693U3I/9a+/tf+wYOAypM75EuWcG6tsZPD4WEOvpa7N7ZIZWXg9n1RqDDHh6cqvBBuQm5PZzMSuZ3GyrwUpJAPSD64TiMRTvak4yNVVggXYw6yIIwFrTKWZZSxEh8vxujk+Y5s/QE1CztEIwcAAA==',
+          }
+          for name, payload in files.items():
+              target=pathlib.Path(name)
+              target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_bytes(gzip.decompress(base64.b64decode(payload)))
+              print("Restored", name)
+          PY
+          python tests/test_overlay.py
+          python integration/apply_sv04_next.py --root . --sources integration --output build-evidence/overlay.json
+      - name: Native Hosttests (nur simulierte Eingaben)
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic tests/test_host.cpp -o /tmp/sv04-next-host
+          /tmp/sv04-next-host | tee build-evidence/host-tests.txt
+      - name: PlatformIO installieren
+        run: python -m pip install platformio==6.1.18
+      - name: Experimentellen Marlin-Quellstand kompilieren
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          pio run -e STM32F103RET6_creality 2>&1 | tee sv04-next-build.log
+      - name: Nachweise sammeln
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build-evidence
+          git rev-parse HEAD > build-evidence/original-commit.txt
+          git status --short > build-evidence/changed-files.txt
+          if [ -f sv04-next-build.log ]; then cp sv04-next-build.log build-evidence/compile.log; fi
+          echo "EXPERIMENT - NICHT FLASHEN - NICHT AM DRUCKER TESTEN" > build-evidence/NICHT_FLASHEN.txt
+          if [ -f .pio/build/STM32F103RET6_creality/firmware.bin ]; then
+            cp .pio/build/STM32F103RET6_creality/firmware.bin build-evidence/SV04_NEXT_EXPERIMENT_NICHT_FLASHEN.bin
+            sha256sum build-evidence/SV04_NEXT_EXPERIMENT_NICHT_FLASHEN.bin > build-evidence/firmware_sha256.txt
+          fi
+      - name: Ergebnisse speichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04-NEXT-10-17-10-21-NICHT-FLASHEN
+          path: build-evidence/
+          if-no-files-found: error
