@@ -1,0 +1,132 @@
+name: '8 - SV04 NEXT Inventur (nur lesen)'
+# Nur lesend: liest das Repository, entpackt eingebettete Payloads der Workflows IN DER LAUFZEIT-KOPIE (nichts wird committet),
+# prueft die fuenf OEM-Dateien per Git-Blob-SHA1, sucht den passenden Commit, meldet Kodierung, Zeilenenden und Build-Flags.
+# Ergebnis: Artefakt "5-inventur". KEIN Build, KEIN Flashen, KEINE Schreibrechte.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventur:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (volle Historie, ohne Zugangsdaten im Arbeitsverzeichnis)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: PyYAML installieren
+        run: python3 -m pip install --quiet pyyaml
+      - name: Inventur erstellen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import base64, binascii, gzip, hashlib, io, json, os, re, subprocess, sys, tarfile, zipfile
+          from pathlib import Path
+          import yaml
+          OUT = Path('out'); OUT.mkdir(exist_ok=True)
+          EXPECTED = json.loads(os.environ.get('SV04_OEM_BLOBS_JSON') or json.dumps({
+            'Marlin/Configuration.h': 'b226c55234de47fe7bf592dbb3b3b12733098532',
+            'Marlin/src/module/probe.cpp': '638bb6be817a98cdcdbb8e5d28bc0a74e7cb1193',
+            'Marlin/src/gcode/bedlevel/abl/G29.cpp': '02df6e4c8d017cf4dd1d4c9e6986a8967a317a8b',
+            'Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp': '2a63c281c8d8861e9780997df60e82becaa02805',
+            'Marlin/src/gcode/calibrate/G28.cpp': '5700ac25228ef7405797a80b840bab1dacddfcc7'}))
+          def sh(*a):
+              r = subprocess.run(a, capture_output=True, text=True); return r.stdout.strip() if r.returncode == 0 else ''
+          def sha256(b): return hashlib.sha256(b).hexdigest()
+          inv = {'git': {'head': sh('git', 'rev-parse', 'HEAD'), 'branch': sh('git', 'rev-parse', '--abbrev-ref', 'HEAD'), 'commits_total': sh('git', 'rev-list', '--count', 'HEAD'), 'log': sh('git', 'log', '-n', '30', '--format=%H %ad %an %s', '--date=short').splitlines()}}
+          # 1) Workflows und Payloads
+          wf_dir = Path('.github/workflows'); inv['workflows'] = []
+          strings = []
+          def walk(o, path=''):
+              if isinstance(o, dict):
+                  for k, v in o.items(): walk(v, path + '/' + str(k))
+              elif isinstance(o, list):
+                  for i, v in enumerate(o): walk(v, path + '[%d]' % i)
+              elif isinstance(o, str): strings.append((path, o))
+          def unpack(raw, dest, report, depth=0):
+              """Erkennt gzip/zip/tar/Text; entpackt nur in out/. Kein Pfad ausserhalb von dest, hoechstens 500 Eintraege/50 MB."""
+              report['sha256'] = sha256(raw); report['bytes'] = len(raw)
+              if raw[:2] == b'\x1f\x8b' and depth < 3:
+                  try: inner = gzip.decompress(raw)
+                  except Exception as e: report['type'] = 'gzip(defekt: %s)' % type(e).__name__; return
+                  report['type'] = 'gzip'; report['inner'] = {}; unpack(inner, dest, report['inner'], depth + 1); return
+              if raw[:4] == b'PK\x03\x04':
+                  report['type'] = 'zip'; report['members'] = []
+                  with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                      for i in z.infolist()[:500]:
+                          ok = not (i.filename.startswith('/') or '..' in Path(i.filename).parts)
+                          report['members'].append({'name': i.filename, 'bytes': i.file_size, 'sha256': sha256(z.read(i)) if ok and i.file_size < 5_000_000 else None, 'safe_path': ok})
+                          if ok and not i.is_dir() and i.file_size < 5_000_000: p = dest / i.filename; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(z.read(i))
+                  return
+              try:
+                  with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+                      report['type'] = 'tar'; report['members'] = []
+                      for m in t.getmembers()[:500]:
+                          ok = m.isfile() and not (m.name.startswith('/') or '..' in Path(m.name).parts)
+                          data = t.extractfile(m).read() if ok and m.size < 5_000_000 else None
+                          report['members'].append({'name': m.name, 'bytes': m.size, 'sha256': sha256(data) if data is not None else None, 'safe_path': ok})
+                          if data is not None: p = dest / m.name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(data)
+                  return
+              except tarfile.TarError: pass
+              try: text = raw.decode('utf-8'); report['type'] = 'text'; report['first_lines'] = text.splitlines()[:3]; (dest / 'payload.txt').write_bytes(raw)
+              except UnicodeDecodeError: report['type'] = 'binary'; (dest / 'payload.bin').write_bytes(raw)
+          if wf_dir.is_dir():
+              for f in sorted(wf_dir.glob('*.y*ml')):
+                  raw = f.read_bytes(); entry = {'file': f.name, 'bytes': len(raw), 'sha256': sha256(raw), 'payloads': []}
+                  try: doc = yaml.safe_load(raw); entry['triggers'] = sorted(doc.get(True, doc.get('on', {})) or {}) if isinstance(doc, dict) else None; entry['permissions'] = doc.get('permissions') if isinstance(doc, dict) else None; strings.clear(); walk(doc)
+                  except Exception as e: entry['yaml_error'] = type(e).__name__; strings.clear(); strings.append(('/raw', raw.decode('utf-8', 'replace')))
+                  seen = set(); n = 0
+                  for path, s in list(strings):
+                      for m in re.finditer(r'(?:[A-Za-z0-9+/]{20,}={0,2}[ \t]*\r?\n?){8,}', s):
+                          blob = re.sub(r'\s+', '', m.group(0))
+                          if len(blob) < 400 or blob in seen: continue
+                          seen.add(blob)
+                          try: dec = base64.b64decode(blob + '=' * (-len(blob) % 4))
+                          except (binascii.Error, ValueError): continue
+                          n += 1; dest = OUT / 'payloads' / f.stem / ('%02d' % n); dest.mkdir(parents=True, exist_ok=True); rep = {'yaml_path': path, 'base64_chars': len(blob)}; unpack(dec, dest, rep); entry['payloads'].append(rep)
+                  inv['workflows'].append(entry)
+          # 2) OEM-Blobs im Arbeitsbaum und in der Historie
+          inv['oem'] = {}
+          for name, want in EXPECTED.items():
+              p = Path(name); rec = {'expected': want, 'exists': p.is_file()}
+              if p.is_file(): rec['worktree_blob'] = sh('git', 'hash-object', name); rec['match_worktree'] = rec['worktree_blob'] == want
+              commits = sh('git', 'rev-list', '--all', '--', name).splitlines()[:3000]
+              rec['commits_with_expected_blob'] = [c for c in commits if sh('git', 'rev-parse', c + ':' + name) == want][:5]; rec['history_commits_checked'] = len(commits); inv['oem'][name] = rec
+          # 3) Kodierung und Zeilenenden
+          enc = {'files': 0, 'crlf': 0, 'bom': 0, 'not_utf8': [], 'oem': {}}
+          for p in Path('Marlin').rglob('*') if Path('Marlin').is_dir() else []:
+              if p.suffix.lower() not in ('.cpp', '.h', '.hpp', '.c', '.ini', '.py'): continue
+              if enc['files'] >= 30000: break
+              b = p.read_bytes(); enc['files'] += 1; enc['crlf'] += b'\r\n' in b; enc['bom'] += b[:3] == b'\xef\xbb\xbf'
+              try: b.decode('utf-8')
+              except UnicodeDecodeError:
+                  if len(enc['not_utf8']) < 100: enc['not_utf8'].append(str(p))
+              if str(p) in EXPECTED: enc['oem'][str(p)] = {'crlf': b'\r\n' in b, 'lf_only_lines': b.count(b'\n') - b.count(b'\r\n'), 'bom': b[:3] == b'\xef\xbb\xbf', 'utf8': str(p) not in enc['not_utf8']}
+          inv['encoding'] = enc
+          # 4) Build-Konfiguration
+          ini = Path('platformio.ini'); flags = {}
+          if ini.is_file():
+              t = ini.read_text(encoding='utf-8', errors='replace'); flags = {'bytes': len(t), 'envs': re.findall(r'^\[env:([^\]]+)\]', t, re.M), 'default_envs': re.findall(r'^default_envs\s*=\s*(.+)$', t, re.M),
+                'fast_math_lines': [l.strip() for l in t.splitlines() if re.search(r'ffast-math|ffinite-math-only|funsafe-math', l)], 'std_lines': [l.strip() for l in t.splitlines() if re.search(r'-std=', l)], 'has_STM32F103RET6_creality': 'STM32F103RET6_creality' in t}
+              (OUT / 'platformio.ini').write_text(t, encoding='utf-8')
+          inv['build'] = flags
+          # 5) vorhandene SV04-NEXT-Overlay-Dateien
+          inv['overlay_files'] = sorted(str(p) for p in Path('.').rglob('*') if p.is_file() and '.git/' not in str(p) and re.search(r'SV04Next|apply_native_guard|sv04_next', p.name + '/' + str(p.parent)))[:400]
+          (OUT / 'inventur.json').write_text(json.dumps(inv, indent=2, ensure_ascii=False), encoding='utf-8')
+          lines = ['# Inventur', 'HEAD: ' + inv['git']['head'], 'Workflows: %d, entpackte Payloads: %d' % (len(inv['workflows']), sum(len(w['payloads']) for w in inv['workflows']))]
+          for n, r in inv['oem'].items(): lines.append('%s: Arbeitsbaum %s; Commits mit erwartetem Blob: %s' % (n, 'OK' if r.get('match_worktree') else ('ABWEICHEND' if r['exists'] else 'FEHLT'), ', '.join(c[:10] for c in r['commits_with_expected_blob']) or 'keiner'))
+          lines.append('fast-math in platformio.ini: %s' % (flags.get('fast_math_lines') or 'nein')); lines.append('CRLF-Dateien: %d von %d; nicht UTF-8: %d' % (enc['crlf'], enc['files'], len(enc['not_utf8'])))
+          (OUT / 'ZUSAMMENFASSUNG.md').write_text('\n'.join(lines) + '\n', encoding='utf-8'); print('\n'.join(lines))
+          PY
+          cat out/ZUSAMMENFASSUNG.md >> "$GITHUB_STEP_SUMMARY"
+          (cd out && find . -type f -print0 | sort -z | xargs -0 sha256sum > ../5-inventur-SHA256.txt) && mv 5-inventur-SHA256.txt out/
+      - name: Ergebnis als Artefakt bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: 5-inventur
+          path: out/
+          retention-days: 14
