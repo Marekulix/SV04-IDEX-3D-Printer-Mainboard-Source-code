@@ -1,0 +1,165 @@
+name: '11 - SV04 NEXT Builddiagnose (Overlay 1)'
+# Baut die Firmware DREIMAL: baseline (ohne Overlay), overlay (SV04-NEXT-Overlay v16) und overlay-auto60 (zusaetzlich -DSV04_NEXT_AUTO60_ENGINE: uebersetzt die Marlin-Bruecke der Ablaufsteuerung,
+# die sonst NICHT einkompiliert ist; es gibt keinen Ausloeser). So werden bestehende Build-Fehler, Overlay-Fehler und Fehler der Bruecke getrennt.
+# Nichts wird committet oder gepusht; das Overlay wird nur in der Laufzeit-Kopie angewendet. KEIN Flashen. Binaerdateien nur auf ausdruecklichen Wunsch (upload_binary=yes) und mit Warnnamen.
+# Voraussetzung fuer 'overlay' und 'host-tests': EINE Datei SV04_NEXT_OVERLAY (1).zip im Repository-Wurzelverzeichnis (aus dem Ergebnis-ZIP). Sie wird nur in der Laufzeit-Kopie entpackt.
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: 'PlatformIO-Environment'
+        default: 'STM32F103RET6_creality'
+      platformio_version:
+        description: 'PlatformIO-Version'
+        default: '6.1.18'
+      upload_binary:
+        description: 'firmware.bin als Artefakt hochladen (nur zur Analyse, NICHT flashen)'
+        type: choice
+        options: ['no', 'yes']
+        default: 'no'
+      overlay_dir:
+        description: 'Ordner, in den SV04_NEXT_OVERLAY (1).zip entpackt wird'
+        default: 'SV04_NEXT_OVERLAY'
+      overlay_zip_sha256:
+        description: 'Erwartetes SHA256 von SV04_NEXT_OVERLAY (1).zip (leer = nur anzeigen)'
+        default: ''
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken und Integritaet anzeigen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "SV04_NEXT_OVERLAY (1).zip" ]; then
+            H=$(sha256sum "SV04_NEXT_OVERLAY (1).zip" | cut -d' ' -f1); echo "SV04_NEXT_OVERLAY (1).zip sha256: $H" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            unzip -q -o "SV04_NEXT_OVERLAY (1).zip" -d .
+            test -d '${{ inputs.overlay_dir }}' || { echo "Nach dem Entpacken fehlt der Ordner ${{ inputs.overlay_dir }}"; exit 1; }
+          else
+            echo "FEHLER: SV04_NEXT_OVERLAY (1).zip fehlt im Repository-Hauptverzeichnis"; exit 1
+          fi
+      - name: Host-Tests (Simulation, KEIN Marlin-Build)
+        shell: bash
+        run: |
+          set -uo pipefail
+          D='${{ inputs.overlay_dir }}'
+          mkdir -p out
+          if [ ! -d "$D/tests" ]; then echo "Overlay-Ordner $D/tests fehlt: Host-Tests NICHT ausgefuehrt (NOT_RUN)" | tee out/host-tests.log; exit 1; fi
+          cd "$D"; rc=0
+          echo "g++: $(g++ --version | head -1)" > "$GITHUB_WORKSPACE/out/host-tests.log"
+          bash tests/run_all_local.sh >> "$GITHUB_WORKSPACE/out/host-tests.log" 2>&1; s=$?; echo "run_all_local Exit $s" >> "$GITHUB_WORKSPACE/out/host-tests.log"; if [ "$s" -ne 0 ]; then rc=1; fi
+          bash tests/run_matrix_11.sh >> "$GITHUB_WORKSPACE/out/host-tests.log" 2>&1; s=$?; echo "run_matrix Exit $s" >> "$GITHUB_WORKSPACE/out/host-tests.log"; if [ "$s" -ne 0 ]; then rc=1; fi
+          if [ -f harness/run_harness.py ]; then python3 harness/run_harness.py >> "$GITHUB_WORKSPACE/out/host-tests.log" 2>&1; s=$?; echo "harness Exit $s" >> "$GITHUB_WORKSPACE/out/host-tests.log"; if [ "$s" -ne 0 ]; then rc=1; fi; fi
+          tail -n 30 "$GITHUB_WORKSPACE/out/host-tests.log" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 6-host-tests
+          path: out/
+          retention-days: 14
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, overlay, overlay-auto60]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken und Integritaet anzeigen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "SV04_NEXT_OVERLAY (1).zip" ]; then
+            H=$(sha256sum "SV04_NEXT_OVERLAY (1).zip" | cut -d' ' -f1); echo "SV04_NEXT_OVERLAY (1).zip sha256: $H" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            unzip -q -o "SV04_NEXT_OVERLAY (1).zip" -d .
+            test -d '${{ inputs.overlay_dir }}' || { echo "Nach dem Entpacken fehlt der Ordner ${{ inputs.overlay_dir }}"; exit 1; }
+          else
+            echo "FEHLER: SV04_NEXT_OVERLAY (1).zip fehlt im Repository-Hauptverzeichnis"; exit 1
+          fi
+      - name: OEM-Quellstand pruefen (Git-Blob-SHA1)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          EXPECTED = json.loads(os.environ.get('SV04_OEM_BLOBS_JSON') or json.dumps({
+            'Marlin/Configuration.h': 'b226c55234de47fe7bf592dbb3b3b12733098532', 'Marlin/src/module/probe.cpp': '638bb6be817a98cdcdbb8e5d28bc0a74e7cb1193',
+            'Marlin/src/gcode/bedlevel/abl/G29.cpp': '02df6e4c8d017cf4dd1d4c9e6986a8967a317a8b', 'Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp': '2a63c281c8d8861e9780997df60e82becaa02805',
+            'Marlin/src/gcode/calibrate/G28.cpp': '5700ac25228ef7405797a80b840bab1dacddfcc7'}))
+          res = {}; bad = []
+          for n, want in EXPECTED.items():
+              got = subprocess.run(['git', 'hash-object', n], capture_output=True, text=True).stdout.strip() if Path(n).is_file() else None
+              res[n] = {'expected': want, 'actual': got, 'match': got == want}
+              if got != want: bad.append(n)
+          Path('out/oem-blobs.json').write_text(json.dumps(res, indent=2)); Path('out/oem-blobs.ok').write_text('1' if not bad else '0')
+          print('OEM-Blobs: %d von %d stimmen' % (len(EXPECTED) - len(bad), len(EXPECTED)))
+          for n in bad: print('ABWEICHUNG:', n, res[n]['actual'])
+          PY
+          { echo '### OEM-Blobs'; cat out/oem-blobs.json; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Overlay anwenden (nur Laufzeit-Kopie; Trockenlauf zuerst)
+        if: matrix.variant != 'baseline'
+        shell: bash
+        run: |
+          set -euo pipefail
+          D='${{ inputs.overlay_dir }}'
+          if [ "$(cat out/oem-blobs.ok)" != "1" ]; then echo "OEM-Stand weicht ab: Overlay wird NICHT angewendet (Sicherung bleibt aktiv)"; exit 1; fi
+          set +e
+          python3 "$D/integration/apply_native_guard_v16.py" --root . --dry-run --diff-out out/overlay-review.diff > out/overlay-dry-run.json 2>out/overlay-dry-run.stderr
+          dry_rc=$?
+          echo "$dry_rc" > out/overlay-dry-run.exit
+          if [ "$dry_rc" -ne 0 ]; then
+            echo '### Overlay dry-run error' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 60 out/overlay-dry-run.stderr >> "$GITHUB_STEP_SUMMARY"
+            cat out/overlay-dry-run.stderr
+            exit "$dry_rc"
+          fi
+          python3 "$D/integration/apply_native_guard_v16.py" --root . --evidence out/overlay-evidence.json > out/overlay-apply.json 2>out/overlay-apply.stderr
+          apply_rc=$?
+          echo "$apply_rc" > out/overlay-apply.exit
+          if [ "$apply_rc" -ne 0 ]; then cat out/overlay-apply.stderr; exit "$apply_rc"; fi
+          set -e
+          git status --short | head -50 > out/overlay-git-status.txt
+          git diff --stat > out/overlay-git-diff-stat.txt || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: PlatformIO installieren und bauen
+        shell: bash
+        run: |
+          set +e
+          python3 -m pip install --quiet "platformio==${{ inputs.platformio_version }}"
+          { echo "python: $(python3 --version)"; echo "platformio: $(pio --version)"; } > out/versions.txt
+          if [ '${{ matrix.variant }}' = 'overlay-auto60' ]; then export PLATFORMIO_BUILD_FLAGS='-DSV04_NEXT_AUTO60_ENGINE'; fi
+          pio run -e '${{ inputs.env_name }}' 2>&1 | tee out/build.log
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > out/build.exit
+          B=".pio/build/${{ inputs.env_name }}"
+          if [ -f "$B/firmware.bin" ]; then
+            sha256sum "$B/firmware.bin" > out/firmware.sha256; ls -l "$B/firmware.bin" > out/firmware.size
+            printf 'NICHT FLASHEN. Unverifizierte CI-Binardatei (variant=${{ matrix.variant }}). Kein Hardwaretest, keine Freigabe.\nVariante overlay-auto60 enthaelt eine per Makro eingeschaltete, nie an Hardware geprueften Ablaufsteuerung (ohne Ausloeser).\n' > out/NOT_FLASHABLE.txt
+            if [ '${{ inputs.upload_binary }}' = 'yes' ]; then cp "$B/firmware.bin" "out/firmware-UNVERIFIED-DO-NOT-FLASH-${{ matrix.variant }}-${GITHUB_SHA::8}.bin"; fi
+          fi
+          grep -E "RAM:|Flash:|error:|Error " out/build.log | tail -n 20 >> "$GITHUB_STEP_SUMMARY"
+          echo "build exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 6-build-${{ matrix.variant }}
+          path: out/
+          retention-days: 14
