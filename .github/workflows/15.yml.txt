@@ -1,0 +1,185 @@
+name: '15 - SV04 NEXT Diagnose und Build (Stand 14)'
+# Ein Lauf liefert ALLES: (1) Diagnose des Overlays gegen den echten Quelltext (alle fehlgeschlagenen Anker auf einmal, echte OEM-Dateien und -Header als Artefakt),
+# (2) vier Builds: baseline, probe (nur Symbol-Probe), overlay, overlay-auto60. Artefakte werden IMMER hochgeladen, auch bei Fehlern. Nur lesend: kein Commit, kein Push, kein Flashen.
+# Voraussetzung: EINE Datei SV04_NEXT_OVERLAY_STAND14.zip im Wurzelverzeichnis des Repositories (wird nur in der Laufzeitkopie entpackt).
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: 'PlatformIO-Environment'
+        default: 'STM32F103RET6_creality'
+      platformio_version:
+        description: 'PlatformIO-Version'
+        default: '6.1.18'
+      upload_binary:
+        description: 'firmware.bin als Artefakt hochladen (nur zur Analyse, NICHT flashen)'
+        type: choice
+        options: ['no', 'yes']
+        default: 'no'
+      overlay_dir:
+        description: 'Ordner, in den SV04_NEXT_OVERLAY_STAND14.zip entpackt wird'
+        default: 'SV04_NEXT_OVERLAY'
+      overlay_zip_sha256:
+        description: 'Erwartetes SHA256 von SV04_NEXT_OVERLAY_STAND14.zip (leer = nur anzeigen)'
+        default: ''
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken und Integritaet anzeigen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f SV04_NEXT_OVERLAY_STAND14.zip ]; then
+            H=$(sha256sum SV04_NEXT_OVERLAY_STAND14.zip | cut -d' ' -f1); echo "SV04_NEXT_OVERLAY_STAND14.zip sha256: $H" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            unzip -q -o SV04_NEXT_OVERLAY_STAND14.zip -d .
+          else
+            echo "Hinweis: SV04_NEXT_OVERLAY_STAND14.zip nicht gefunden (Diagnose ohne Overlay-Ordner nicht moeglich)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Diagnose gegen den echten Quelltext
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          D='${{ inputs.overlay_dir }}'
+          if [ -d "$D" ]; then
+            python3 "$D/tools/overlay_diagnose.py" --root . --overlay "$D" --out out/diagnose > out/diagnose.stdout 2> out/diagnose.stderr
+            echo $? > out/diagnose.exit
+          else
+            echo "Overlay-Ordner $D fehlt" > out/diagnose.stderr; echo 2 > out/diagnose.exit
+          fi
+          cat out/diagnose.stdout >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          if [ -f out/diagnose/DIAGNOSE.md ]; then head -c 50000 out/diagnose/DIAGNOSE.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 15-diagnose
+          path: out/
+          retention-days: 14
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, probe, overlay, overlay-auto60]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [ -f SV04_NEXT_OVERLAY_STAND14.zip ]; then
+            H=$(sha256sum SV04_NEXT_OVERLAY_STAND14.zip | cut -d' ' -f1); echo "$H" > out/overlay-zip.sha256
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            unzip -q -o SV04_NEXT_OVERLAY_STAND14.zip -d .
+          else
+            echo "nicht vorhanden" > out/overlay-zip.sha256
+          fi
+      - name: OEM-Quellstand pruefen (Git-Blob-SHA1)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          EXPECTED = json.loads(os.environ.get('SV04_OEM_BLOBS_JSON') or json.dumps({
+            'Marlin/Configuration.h': 'b226c55234de47fe7bf592dbb3b3b12733098532', 'Marlin/src/module/probe.cpp': '638bb6be817a98cdcdbb8e5d28bc0a74e7cb1193',
+            'Marlin/src/gcode/bedlevel/abl/G29.cpp': '02df6e4c8d017cf4dd1d4c9e6986a8967a317a8b', 'Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp': '2a63c281c8d8861e9780997df60e82becaa02805',
+            'Marlin/src/gcode/calibrate/G28.cpp': '5700ac25228ef7405797a80b840bab1dacddfcc7'}))
+          res = {}; bad = []
+          for n, want in EXPECTED.items():
+              got = subprocess.run(['git', 'hash-object', n], capture_output=True, text=True).stdout.strip() if Path(n).is_file() else None
+              res[n] = {'expected': want, 'actual': got, 'match': got == want}
+              if got != want: bad.append(n)
+          Path('out/oem-blobs.json').write_text(json.dumps(res, indent=2)); Path('out/oem-blobs.ok').write_text('1' if not bad else '0')
+          print('OEM-Blobs: %d von %d stimmen' % (len(EXPECTED) - len(bad), len(EXPECTED)))
+          PY
+      - name: Variante vorbereiten (Overlay anwenden bzw. Probe einsetzen; nur Laufzeitkopie)
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          D='${{ inputs.overlay_dir }}'
+          V='${{ matrix.variant }}'
+          echo "$V" > out/variant.txt
+          case "$V" in
+            overlay|overlay-auto60)
+              python3 "$D/integration/apply_native_guard_v16.py" --root . --dry-run --diff-out out/overlay-review.diff > out/overlay-dry-run.json 2> out/overlay-dry-run.stderr
+              echo $? > out/overlay-dry-run.exit
+              if [ "$(cat out/overlay-dry-run.exit)" = "0" ]; then
+                python3 "$D/integration/apply_native_guard_v16.py" --root . --evidence out/overlay-evidence.json > out/overlay-apply.json 2> out/overlay-apply.stderr
+                echo $? > out/overlay-apply.exit
+              else
+                echo "SKIPPED" > out/overlay-apply.exit
+              fi
+              ;;
+            probe)
+              if [ -f "$D/ci/SV04NextSymbolProbe.cpp" ]; then
+                mkdir -p Marlin/src/feature/sv04_next
+                cp "$D/ci/SV04NextSymbolProbe.cpp" Marlin/src/feature/sv04_next/sv04_next_symbol_probe.cpp
+                echo "kopiert" > out/probe.copied
+              else
+                echo "Probe-Datei fehlt" > out/probe.copied
+              fi
+              ;;
+          esac
+          git status --short | head -50 > out/git-status.txt
+          git diff --stat > out/git-diff-stat.txt
+          exit 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: PlatformIO installieren und bauen
+        shell: bash
+        run: |
+          set +e
+          V='${{ matrix.variant }}'
+          if { [ "$V" = "overlay" ] || [ "$V" = "overlay-auto60" ]; } && [ "$(cat out/overlay-apply.exit 2>/dev/null)" != "0" ]; then
+            echo "SKIPPED (Overlay nicht angewendet; siehe overlay-dry-run.stderr)" > out/build.skipped
+            echo "SKIPPED" > out/build.exit
+            echo "Build uebersprungen: Overlay-Anwendung fehlgeschlagen" >> "$GITHUB_STEP_SUMMARY"
+            cat out/overlay-dry-run.stderr | tail -n 5 >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 -m pip install --quiet "platformio==${{ inputs.platformio_version }}"
+          { echo "python: $(python3 --version)"; echo "platformio: $(pio --version)"; } > out/versions.txt
+          if [ "$V" = "overlay-auto60" ]; then export PLATFORMIO_BUILD_FLAGS='-DSV04_NEXT_AUTO60_ENGINE'; fi
+          pio run -e '${{ inputs.env_name }}' 2>&1 | tee out/build.log
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > out/build.exit
+          grep -nE "error:|fatal error|SV04PROBE|undefined reference|PatchRefused" out/build.log > out/build-errors.txt
+          B=".pio/build/${{ inputs.env_name }}"
+          if [ -f "$B/firmware.bin" ]; then
+            sha256sum "$B/firmware.bin" > out/firmware.sha256; ls -l "$B/firmware.bin" > out/firmware.size
+            printf 'NICHT FLASHEN. Unverifizierte CI-Binardatei (variant=%s). Kein Hardwaretest, keine Freigabe.\n' "$V" > out/NOT_FLASHABLE.txt
+            if [ '${{ inputs.upload_binary }}' = 'yes' ]; then cp "$B/firmware.bin" "out/firmware-UNVERIFIED-DO-NOT-FLASH-$V-${GITHUB_SHA::8}.bin"; fi
+          fi
+          { echo "build exit: $rc"; grep -E "RAM:|Flash:" out/build.log | tail -n 2; head -n 40 out/build-errors.txt; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 15-build-${{ matrix.variant }}
+          path: out/
+          retention-days: 14
+      - name: Ergebnis bewerten (Artefakte sind bereits hochgeladen)
+        shell: bash
+        run: |
+          rc="$(cat out/build.exit 2>/dev/null || echo missing)"
+          echo "Variante ${{ matrix.variant }}: build.exit=$rc"
+          if [ "$rc" = "0" ]; then exit 0; fi
+          exit 1
