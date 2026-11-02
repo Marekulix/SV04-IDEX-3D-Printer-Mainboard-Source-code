@@ -1,0 +1,293 @@
+name: '22 - SV04 NEXT Stand 20: Diagnose, 4 Builds, Host-Tests - NICHT FLASHEN'
+# Stand 20. Ein Lauf liefert ALLES: Diagnose gegen den echten Quelltext, Symbol-Probe, Trockenlauf, Anwendung und vier Builds (baseline, probe, overlay, overlay-auto60).
+# Das Overlay-CLI findet seine Header relativ zum SKRIPTORT (Workflow 15 scheiterte daran, dass es sie relativ zum Arbeitsverzeichnis suchte).
+# Artefakte werden IMMER hochgeladen, auch bei Fehlern; ein nicht angewendetes Overlay wird NIE als Overlay-Build gemeldet. Nur lesend: kein Commit, kein Push, kein Flashen, keine Secrets.
+# Voraussetzung: EINE Datei SV04_NEXT_OVERLAY_22.zip (Parameter overlay_zip) im Wurzelverzeichnis des Repositories; sie wird nur in der Laufzeitkopie entpackt (ein alter Ordner wird dort vorher geloescht).
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: 'PlatformIO-Environment'
+        default: 'STM32F103RET6_creality'
+      platformio_version:
+        description: 'PlatformIO-Version'
+        default: '6.1.18'
+      upload_binary:
+        description: 'firmware.bin als Artefakt hochladen (nur zur Analyse, NICHT flashen)'
+        type: choice
+        options: ['no', 'yes']
+        default: 'no'
+      overlay_dir:
+        description: 'Ordner, in den SV04_NEXT_OVERLAY.zip entpackt wird'
+        default: 'SV04_NEXT_OVERLAY'
+      overlay_zip:
+        description: 'Dateiname der Overlay-ZIP im Wurzelverzeichnis des Repositories'
+        default: 'SV04_NEXT_OVERLAY_22.zip'
+      repro_check:
+        description: 'Baseline ein zweites Mal bauen und die Hashes vergleichen (Reproduzierbarkeit)'
+        type: choice
+        options: ['yes', 'no']
+        default: 'yes'
+      overlay_zip_sha256:
+        description: 'Erwartetes SHA256 der Overlay-ZIP (leer = nur anzeigen)'
+        default: '64918279e5016ab5ec9fc919ecbe8952102e2093bdb0843e89f3e8e67ab8e396'
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken und Integritaet anzeigen
+        shell: bash
+        run: |
+          set -euo pipefail
+          Z='${{ inputs.overlay_zip }}'
+          if [ -f "$Z" ]; then
+            H=$(sha256sum "$Z" | cut -d' ' -f1); echo "$Z sha256: $H" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            rm -rf '${{ inputs.overlay_dir }}'
+            unzip -q -o "$Z" -d .
+          else
+            echo "FEHLER: $Z nicht gefunden; den exakten Dateinamen im Repo pruefen" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+      - name: Diagnose gegen den echten Quelltext
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          D='${{ inputs.overlay_dir }}'
+          if [ -d "$D" ]; then
+            python3 "$D/tools/overlay_diagnose.py" --root . --overlay "$D" --out out/diagnose > out/diagnose.stdout 2> out/diagnose.stderr
+            echo $? > out/diagnose.exit
+          else
+            echo "Overlay-Ordner $D fehlt" > out/diagnose.stderr; echo 2 > out/diagnose.exit
+          fi
+          cat out/diagnose.stdout >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+          if [ -f out/diagnose/DIAGNOSE.md ]; then head -c 50000 out/diagnose/DIAGNOSE.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit 0
+      - name: Repository-Inventar (Workflow-Nummern, Display-Ressourcen, Zeitstempel im Quelltext)
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          { git rev-parse HEAD; echo "GITHUB_SHA=$GITHUB_SHA"; } > out/commit.txt
+          ls -1 .github/workflows 2>/dev/null | sort -V > out/workflows-present.txt
+          git ls-files | grep -iE 'dwin|dgus|\.icl$|\.hmi$|\.bmp$|\.jpg$|\.tft$|T5UID|DWIN_SET' | head -300 > out/display-assets.txt
+          grep -rnE '__DATE__|__TIME__|__TIMESTAMP__' Marlin buildroot --include=*.h --include=*.cpp --include=*.ini --include=*.py 2>/dev/null | head -60 > out/timestamp-sources.txt
+          { echo "## Commit"; cat out/commit.txt; echo; echo "## Workflows im Repository (naechste freie Nummer pruefen)"; cat out/workflows-present.txt; echo; echo "## Display-Ressourcen (Dateien: $(wc -l < out/display-assets.txt))"; head -20 out/display-assets.txt; echo; echo "## Zeitstempel-Quellen im Quelltext: $(wc -l < out/timestamp-sources.txt)"; head -10 out/timestamp-sources.txt; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 22-diagnose
+          path: out/
+          retention-days: 14
+  host-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Overlay-ZIP entpacken
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          Z='${{ inputs.overlay_zip }}'
+          if [ -f "$Z" ]; then
+            H=$(sha256sum "$Z" | cut -d' ' -f1); echo "$H" > out/overlay-zip.sha256
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            rm -rf '${{ inputs.overlay_dir }}'
+            unzip -q -o "$Z" -d .
+          else
+            echo "FEHLER: $Z nicht gefunden" > out/overlay-zip.sha256; exit 1
+          fi
+      - name: Hilfspakete fuer die Tests
+        shell: bash
+        run: python3 -m pip install --quiet pyyaml
+      - name: Host-Testsuite auf sauberer CI-Maschine
+        shell: bash
+        run: |
+          set +e
+          D='${{ inputs.overlay_dir }}'
+          { echo "g++: $(g++ --version | head -1)"; echo "python: $(python3 --version)"; echo "objdump: $(objdump --version | head -1)"; } > out/host-versions.txt
+          if [ -d "$D" ]; then
+            ( cd "$D" && bash tests/run_all_local.sh ) > out/host-tests.log 2>&1
+            echo $? > out/host-tests.exit
+          else
+            echo "Overlay-Ordner fehlt" > out/host-tests.log; echo 2 > out/host-tests.exit
+          fi
+          tail -n 25 out/host-tests.log >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 22-host-tests
+          path: out/
+          retention-days: 14
+      - name: Ergebnis bewerten (Artefakte sind bereits hochgeladen)
+        shell: bash
+        run: |
+          rc="$(cat out/host-tests.exit 2>/dev/null || echo missing)"
+          echo "Host-Tests: exit=$rc"
+          if [ "$rc" = "0" ]; then exit 0; fi
+          exit 1
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, probe, overlay, overlay-auto60]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Overlay-ZIP entpacken
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          Z='${{ inputs.overlay_zip }}'
+          if [ -f "$Z" ]; then
+            H=$(sha256sum "$Z" | cut -d' ' -f1); echo "$H" > out/overlay-zip.sha256
+            if [ -n '${{ inputs.overlay_zip_sha256 }}' ] && [ "$H" != '${{ inputs.overlay_zip_sha256 }}' ]; then echo "SHA256 weicht ab: abgebrochen"; exit 1; fi
+            rm -rf '${{ inputs.overlay_dir }}'
+            unzip -q -o "$Z" -d .
+          else
+            echo "FEHLER: $Z nicht gefunden" > out/overlay-zip.sha256; exit 1
+          fi
+      - name: OEM-Quellstand pruefen (Git-Blob-SHA1)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          EXPECTED = json.loads(os.environ.get('SV04_OEM_BLOBS_JSON') or json.dumps({
+            'Marlin/Configuration.h': 'b226c55234de47fe7bf592dbb3b3b12733098532', 'Marlin/src/module/probe.cpp': '638bb6be817a98cdcdbb8e5d28bc0a74e7cb1193',
+            'Marlin/src/gcode/bedlevel/abl/G29.cpp': '02df6e4c8d017cf4dd1d4c9e6986a8967a317a8b', 'Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp': '2a63c281c8d8861e9780997df60e82becaa02805',
+            'Marlin/src/gcode/calibrate/G28.cpp': '5700ac25228ef7405797a80b840bab1dacddfcc7'}))
+          res = {}; bad = []
+          for n, want in EXPECTED.items():
+              got = subprocess.run(['git', 'hash-object', n], capture_output=True, text=True).stdout.strip() if Path(n).is_file() else None
+              res[n] = {'expected': want, 'actual': got, 'match': got == want}
+              if got != want: bad.append(n)
+          Path('out/oem-blobs.json').write_text(json.dumps(res, indent=2)); Path('out/oem-blobs.ok').write_text('1' if not bad else '0')
+          print('OEM-Blobs: %d von %d stimmen' % (len(EXPECTED) - len(bad), len(EXPECTED)))
+          PY
+      - name: Variante vorbereiten (Overlay anwenden bzw. Probe einsetzen; nur Laufzeitkopie)
+        shell: bash
+        run: |
+          set +e
+          mkdir -p out
+          D="$GITHUB_WORKSPACE/${{ inputs.overlay_dir }}"
+          V='${{ matrix.variant }}'
+          echo "$V" > out/variant.txt
+          case "$V" in
+            overlay|overlay-auto60)
+              python3 "$D/integration/apply_native_guard_v17.py" --root "$GITHUB_WORKSPACE" --dry-run --diff-out out/overlay-review.diff > out/overlay-dry-run.json 2> out/overlay-dry-run.stderr
+              echo $? > out/overlay-dry-run.exit
+              if [ "$(cat out/overlay-dry-run.exit)" = "0" ]; then
+                python3 "$D/integration/apply_native_guard_v17.py" --root "$GITHUB_WORKSPACE" --evidence out/overlay-evidence.json > out/overlay-apply.json 2> out/overlay-apply.stderr
+                echo $? > out/overlay-apply.exit
+              else
+                echo "SKIPPED" > out/overlay-apply.exit
+              fi
+              ;;
+            probe)
+              if [ -f "$D/ci/SV04NextSymbolProbe.cpp" ]; then
+                mkdir -p Marlin/src/feature/sv04_next
+                cp "$D/ci/SV04NextSymbolProbe.cpp" Marlin/src/feature/sv04_next/sv04_next_symbol_probe.cpp
+                echo "kopiert" > out/probe.copied
+              else
+                echo "Probe-Datei fehlt" > out/probe.copied
+              fi
+              ;;
+          esac
+          git status --short | head -80 > out/git-status.txt
+          git diff --stat > out/git-diff-stat.txt
+          exit 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: PlatformIO installieren und bauen
+        shell: bash
+        run: |
+          set +e
+          V='${{ matrix.variant }}'
+          if { [ "$V" = "overlay" ] || [ "$V" = "overlay-auto60" ]; } && [ "$(cat out/overlay-apply.exit 2>/dev/null)" != "0" ]; then
+            echo "SKIPPED (Overlay nicht angewendet; siehe overlay-dry-run.stderr)" > out/build.skipped
+            echo "SKIPPED" > out/build.exit
+            echo "Build uebersprungen: Overlay-Anwendung fehlgeschlagen" >> "$GITHUB_STEP_SUMMARY"
+            cat out/overlay-dry-run.stderr | tail -n 5 >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 -m pip install --quiet "platformio==${{ inputs.platformio_version }}"
+          { echo "python: $(python3 --version)"; echo "platformio: $(pio --version)"; } > out/versions.txt
+          if [ "$V" = "overlay-auto60" ]; then export PLATFORMIO_BUILD_FLAGS='-DSV04_NEXT_AUTO60_ENGINE'; fi
+          pio run -e '${{ inputs.env_name }}' 2>&1 | tee out/build.log
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > out/build.exit
+          grep -nE "error:|fatal error|SV04PROBE|undefined reference|PatchRefused" out/build.log > out/build-errors.txt
+          B=".pio/build/${{ inputs.env_name }}"
+          if [ -f "$B/firmware.bin" ]; then
+            sha256sum "$B/firmware.bin" > out/firmware.sha256; ls -l "$B/firmware.bin" > out/firmware.size
+            printf 'NICHT FLASHEN. Unverifizierte CI-Binardatei (variant=%s). Kein Hardwaretest, keine Freigabe.\n' "$V" > out/NOT_FLASHABLE.txt
+            if [ '${{ inputs.upload_binary }}' = 'yes' ]; then cp "$B/firmware.bin" "out/firmware-UNVERIFIED-DO-NOT-FLASH-$V-${GITHUB_SHA::8}.bin"; fi
+          fi
+          { echo "build exit: $rc"; grep -E "RAM:|Flash:" out/build.log | tail -n 2; head -n 40 out/build-errors.txt; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Commit-SHA, Binary-Erreichbarkeit und Reproduzierbarkeit
+        shell: bash
+        run: |
+          set +e
+          V='${{ matrix.variant }}'
+          { git rev-parse HEAD; echo "GITHUB_SHA=$GITHUB_SHA"; } > out/commit.txt
+          B=".pio/build/${{ inputs.env_name }}"
+          TC="$HOME/.platformio/packages/toolchain-gccarmnoneeabi/bin"
+          D="$GITHUB_WORKSPACE/${{ inputs.overlay_dir }}"
+          if [ -f "$B/firmware.elf" ] && [ -x "$TC/arm-none-eabi-nm" ] && [ -f "$D/tools/reach_analyze.py" ]; then
+            "$TC/arm-none-eabi-nm" -C -S --size-sort "$B/firmware.elf" > out/symbols.txt 2> out/symbols.err
+            "$TC/arm-none-eabi-size" -A "$B/firmware.elf" > out/sections.txt 2> /dev/null
+            "$TC/arm-none-eabi-objdump" -d -C --no-show-raw-insn "$B/firmware.elf" > /tmp/dis.txt 2> out/objdump.err
+            P="$V"; if [ "$V" = "probe" ]; then P="baseline"; fi
+            python3 "$D/tools/reach_analyze.py" --objdump /tmp/dis.txt --nm out/symbols.txt --profile "$P" --out-json out/reach.json --out-md out/reach.md > out/reach.stdout 2> out/reach.stderr
+            echo $? > out/reach.exit
+            "$TC/arm-none-eabi-strings" -n 12 "$B/firmware.bin" 2> /dev/null | grep -E "SV04 NEXT" | sort -u > out/bin-strings-sv04.txt
+            { echo "Binary-Erreichbarkeit ($P): exit $(cat out/reach.exit)"; head -n 30 out/reach.md; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "kein ELF, keine Binutils oder kein Analysewerkzeug gefunden" > out/reach.skipped
+          fi
+          if [ "$V" = "baseline" ] && [ '${{ inputs.repro_check }}' = 'yes' ] && [ -f "$B/firmware.bin" ]; then
+            cp "$B/firmware.bin" /tmp/first.bin; rm -rf "$B"
+            pio run -e '${{ inputs.env_name }}' > out/repro-build.log 2>&1; echo $? > out/repro.exit
+            { echo "first=$(sha256sum /tmp/first.bin | cut -d' ' -f1)"; echo "second=$(sha256sum "$B/firmware.bin" 2> /dev/null | cut -d' ' -f1)"; if cmp -s /tmp/first.bin "$B/firmware.bin"; then echo "IDENTISCH"; else echo "VERSCHIEDEN"; fi; } > out/repro.txt
+            cmp -l /tmp/first.bin "$B/firmware.bin" 2> /dev/null | wc -l > out/repro-diff-bytes.txt
+            { strings -n 8 /tmp/first.bin | grep -E '20[0-9]{2}' | head -20; echo ---; strings -n 8 "$B/firmware.bin" | grep -E '20[0-9]{2}' | head -20; } > out/repro-datestrings.txt 2> /dev/null
+            { echo "Reproduzierbarkeit baseline:"; cat out/repro.txt; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 22-build-${{ matrix.variant }}
+          path: out/
+          retention-days: 14
+      - name: Ergebnis bewerten (Artefakte sind bereits hochgeladen)
+        shell: bash
+        run: |
+          rc="$(cat out/build.exit 2>/dev/null || echo missing)"
+          echo "Variante ${{ matrix.variant }}: build.exit=$rc"
+          if [ "$rc" = "0" ]; then exit 0; fi
+          exit 1
