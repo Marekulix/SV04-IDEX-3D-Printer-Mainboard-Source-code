@@ -1,0 +1,69 @@
+name: '60 - SV04 NEXT source audit and STM32 build - NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'SV04_NEXT_60.zip'
+      - 'firmware/**'
+      - '.github/workflows/60.yml'
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require exactly uploaded SV04 NEXT 60 package
+        run: test -s SV04_NEXT_60.zip
+      - name: Extract verification package
+        run: unzip -oq SV04_NEXT_60.zip
+      - name: Verify package checksums
+        run: |
+          cd SV04_NEXT_60
+          sha256sum -c SHA256SUMS.txt
+      - name: Run all host safety and DWIN contract tests
+        run: bash SV04_NEXT_60/ci_verify60.sh | tee sv04next60-host.log
+      - name: Upload host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next60-host-evidence
+          path: sv04next60-host.log
+          if-no-files-found: warn
+  stm32-build:
+    runs-on: ubuntu-24.04
+    needs: host-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract 60 verifier
+        run: unzip -oq SV04_NEXT_60.zip
+      - name: Verify full OEM sources and explicit board environment (FAIL CLOSED)
+        shell: bash
+        run: |
+          mkdir -p SV04_NEXT_60/proof
+          if [ ! -f firmware/SV04_NEXT_STM32_ENV.txt ]; then
+            echo 'BLOCKED: firmware/SV04_NEXT_STM32_ENV.txt missing, no proven board environment' | tee SV04_NEXT_60/proof/build_blocked.txt
+            python3 SV04_NEXT_60/tools/preflight60.py --base firmware --output SV04_NEXT_60/proof/preflight60.json || true
+            exit 1
+          fi
+          ENV_NAME="$(tr -d '\r\n' < firmware/SV04_NEXT_STM32_ENV.txt)"
+          if [[ ! "$ENV_NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo 'BLOCKED: invalid board environment' | tee SV04_NEXT_60/proof/build_blocked.txt
+            exit 1
+          fi
+          echo "SV04_PIO_ENV=$ENV_NAME" >> "$GITHUB_ENV"
+          python3 SV04_NEXT_60/tools/preflight60.py --base firmware --env "$ENV_NAME" --output SV04_NEXT_60/proof/preflight60.json
+      - name: Install PlatformIO
+        run: python3 -m pip install --disable-pip-version-check platformio
+      - name: Actual STM32 build from OEM sources (no flash)
+        working-directory: firmware
+        run: pio run -e "$SV04_PIO_ENV" 2>&1 | tee ../SV04_NEXT_60/proof/stm32-build.log
+      - name: Upload preflight and build evidence regardless of success
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next60-stm32-evidence
+          path: |
+            SV04_NEXT_60/proof/
+            firmware/.pio/build/
+          if-no-files-found: warn
