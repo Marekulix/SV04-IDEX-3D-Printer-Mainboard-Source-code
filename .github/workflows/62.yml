@@ -1,0 +1,67 @@
+name: '62 - SV04 NEXT pinned OEM vs integrated diagnostic - NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -oq SV04_NEXT_62.zip
+          (cd SV04_NEXT_62 && sha256sum -c SHA256SUMS.txt)
+          (cd SV04_NEXT_62 && python3 -m unittest discover -s tests -v) 2>&1 | tee sv04next62-host.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next62-host-evidence
+          path: sv04next62-host.log
+  stm32:
+    runs-on: ubuntu-24.04
+    needs: host
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -oq SV04_NEXT_62.zip
+          (cd SV04_NEXT_62 && sha256sum -c SHA256SUMS.txt)
+      - name: Get original Sovol firmware (immutable commit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_base62
+          git -C _sv04_base62 checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C _sv04_base62 rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          mkdir -p proof62
+      - name: Build OEM firmware reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check platformio
+          (cd _sv04_base62 && pio run -e STM32F103RET6_creality) 2>&1 | tee proof62/baseline-build.log
+          cp _sv04_base62/.pio/build/STM32F103RET6_creality/firmware.bin proof62/reference.bin
+          sha256sum proof62/reference.bin > proof62/baseline-sha256.txt
+      - name: Apply native read-only overlay and rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 SV04_NEXT_62/tools/apply62.py --root _sv04_base62 --report proof62/overlay.json
+          (cd _sv04_base62 && pio run -e STM32F103RET6_creality) 2>&1 | tee proof62/overlay-build.log
+          test -s _sv04_base62/.pio/build/STM32F103RET6_creality/firmware.bin
+          sha256sum _sv04_base62/.pio/build/STM32F103RET6_creality/firmware.bin > proof62/overlay-sha256.txt
+          ! cmp -s proof62/reference.bin _sv04_base62/.pio/build/STM32F103RET6_creality/firmware.bin
+          strings _sv04_base62/.pio/build/STM32F103RET6_creality/firmware.elf | grep -F 'SV04NEXT62 DIAG READONLY' > proof62/marker.txt
+          echo 'STAND62_NATIVE_OVERLAY_BUILD_PASS FLASH_APPROVED=NO' > proof62/status.txt
+          rm -f proof62/reference.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next62-stm32-evidence
+          path: proof62/
+          if-no-files-found: warn
