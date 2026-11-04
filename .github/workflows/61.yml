@@ -1,0 +1,91 @@
+name: '61 - SV04 NEXT source discovery and pinned Sovol baseline build - NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'SV04_NEXT_61.zip'
+      - '.github/workflows/61.yml'
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s SV04_NEXT_61.zip
+          unzip -oq SV04_NEXT_61.zip
+          (cd SV04_NEXT_61 && sha256sum -c SHA256SUMS.txt)
+      - name: Run host regression tests
+        run: bash SV04_NEXT_61/ci_verify61.sh | tee sv04next61-host.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next61-host-evidence
+          path: sv04next61-host.log
+          if-no-files-found: warn
+  stm32-baseline:
+    runs-on: ubuntu-24.04
+    needs: host-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract verified helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -oq SV04_NEXT_61.zip
+          (cd SV04_NEXT_61 && sha256sum -c SHA256SUMS.txt)
+      - name: Discover existing source or fetch pinned official OEM baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p SV04_NEXT_61/proof
+          python3 - <<'PY'
+          import pathlib,sys,os
+          sys.path.insert(0,'SV04_NEXT_61/tools')
+          from source61 import determine
+          root=determine(pathlib.Path('.'))
+          with open(os.environ['GITHUB_ENV'],'a') as out:
+            if root:
+              print('SV04_SOURCE_ROOT='+str(root.resolve()),file=out)
+              print('SV04_SOURCE_KIND=REPOSITORY_EXISTING_UNVERIFIED',file=out)
+            else:
+              print('SV04_SOURCE_ROOT='+str((pathlib.Path('_sv04_official_baseline')).resolve()),file=out)
+              print('SV04_SOURCE_KIND=PINNED_OEM_REFERENCE_ONLY',file=out)
+          PY
+          SV04_SOURCE_ROOT="$(grep '^SV04_SOURCE_ROOT=' "$GITHUB_ENV" | tail -1 | cut -d= -f2-)"
+          SV04_SOURCE_KIND="$(grep '^SV04_SOURCE_KIND=' "$GITHUB_ENV" | tail -1 | cut -d= -f2-)"
+          if [ ! -f "$SV04_SOURCE_ROOT/platformio.ini" ]; then
+            git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git "$SV04_SOURCE_ROOT"
+            git -C "$SV04_SOURCE_ROOT" checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+            test "$(git -C "$SV04_SOURCE_ROOT" rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          fi
+          python3 SV04_NEXT_61/tools/source61.py --root "$SV04_SOURCE_ROOT" --out SV04_NEXT_61/proof/source61.json
+          echo "SOURCE_KIND=$SV04_SOURCE_KIND" | tee SV04_NEXT_61/proof/source_kind.txt
+      - name: Install PlatformIO and compile STM32 baseline (no flashing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check platformio
+          (cd "$SV04_SOURCE_ROOT" && pio run -e STM32F103RET6_creality) 2>&1 | tee SV04_NEXT_61/proof/stm32-build.log
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,hashlib,json
+          p=Path(os.environ['SV04_SOURCE_ROOT'])/'.pio/build/STM32F103RET6_creality'
+          artifacts=[]
+          for f in p.glob('*.bin'):
+            artifacts.append({'filename':f.name,'size':f.stat().st_size,'sha256':hashlib.sha256(f.read_bytes()).hexdigest(),'flash_approved':False})
+          assert artifacts,'PlatformIO returned success but no .bin output found'
+          out={'source_kind':os.environ['SV04_SOURCE_KIND'],'flash_approved':False,'build_artifacts':artifacts}
+          Path('SV04_NEXT_61/proof/build61.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+      - name: Upload build evidence - no firmware image exposed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next61-stm32-evidence
+          path: SV04_NEXT_61/proof/
+          if-no-files-found: warn
