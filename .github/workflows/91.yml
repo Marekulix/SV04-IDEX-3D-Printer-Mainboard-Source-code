@@ -1,0 +1,81 @@
+name: '91 - SV04 NEXT Punkt 1 Marlin Integration STM32'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    name: 'Host tests and package proof'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Verify bundle and run host tests'
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence91-host
+          if ! unzip -oq SV04_NEXT_91.zip; then echo 'ERROR: Missing or damaged SV04_NEXT_91.zip' | tee evidence91-host/zip-error.txt; exit 1; fi
+          (cd SV04_NEXT_91 && sha256sum -c SHA256SUMS.txt) > evidence91-host/sha256-check.log 2>&1 || { cat evidence91-host/sha256-check.log; exit 1; }
+          (cd SV04_NEXT_91 && python3 -m unittest discover -s tests -p 'test*.py' -v) > evidence91-host/host-tests.log 2>&1
+          rc=$?
+          tail -60 evidence91-host/host-tests.log
+          echo "$rc" > evidence91-host/host-exit-code.txt
+          exit "$rc"
+      - name: 'Upload host evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next91-host-evidence
+          path: evidence91-host/
+          if-no-files-found: warn
+  stm32:
+    name: 'Integrate pinned Marlin and build STM32'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Verify bundle'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence91-stm32
+          unzip -oq SV04_NEXT_91.zip
+          (cd SV04_NEXT_91 && sha256sum -c SHA256SUMS.txt) > evidence91-stm32/package-hashes.log 2>&1
+      - name: 'Checkout pinned Sovol mainboard sources'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_oem91 2>&1 | tee evidence91-stm32/oem-clone.log
+          git -C _sv04_oem91 checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe 2>&1 | tee evidence91-stm32/oem-checkout.log
+          git -C _sv04_oem91 rev-parse HEAD > evidence91-stm32/oem-commit.txt
+          test "$(cat evidence91-stm32/oem-commit.txt)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+      - name: 'Install PlatformIO'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --break-system-packages --disable-pip-version-check platformio 2>&1 | tee evidence91-stm32/pio-install.log
+          pio --version | tee evidence91-stm32/pio-version.txt
+      - name: 'Apply full patches and compile STM32'
+        shell: bash
+        run: |
+          set -uo pipefail
+          python3 SV04_NEXT_91/tools/integrate82.py --root _sv04_oem91 --out evidence91-stm32/patch-and-build --build > evidence91-stm32/integration-console.log 2>&1
+          rc=$?
+          echo "$rc" > evidence91-stm32/integration-exit-code.txt
+          tail -100 evidence91-stm32/integration-console.log
+          if [ "$rc" -eq 0 ]; then
+            python3 - <<'PY' > evidence91-stm32/binary-metadata.json
+          import pathlib,hashlib,json
+          d=pathlib.Path('_sv04_oem91/.pio/build/STM32F103RET6_creality')
+          print(json.dumps({p.name:{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in (d/'firmware.bin',d/'firmware.elf')},indent=2))
+          PY
+          fi
+          exit "$rc"
+      - name: 'Upload STM32 evidence (including failure logs)'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next91-stm32-evidence
+          path: evidence91-stm32/
+          if-no-files-found: warn
