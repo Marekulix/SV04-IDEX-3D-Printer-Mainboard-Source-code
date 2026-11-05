@@ -1,0 +1,112 @@
+name: 112 - SV04 NEXT DWIN OEM Marlin DGUS contract and simulated serial
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dwin-112:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout working repository
+        uses: actions/checkout@v4
+      - name: Verify package exact name and extract
+        run: |
+          set -euo pipefail
+          test -f 112_A.zip
+          mkdir -p bundle112 evidence112
+          unzip -t 112_A.zip | tail -1
+          unzip -q 112_A.zip -d bundle112
+          test -f bundle112/tools/build109.py
+          test -f bundle112/tools/audit112.py
+          test -f bundle112/tests/test112.py
+      - name: Install Python image dependency
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Get pinned SV04 DGUS project
+        run: |
+          git clone https://github.com/bphillips09/SV04-Touchscreen.git original-dgus
+          (cd original-dgus && git checkout --detach 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4 && test "$(git rev-parse HEAD)" = 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4)
+      - name: Get pinned OEM Marlin sources
+        run: |
+          set -euo pipefail
+          mkdir -p marlin-source evidence112
+          URL="https://raw.githubusercontent.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code/1867fcba75354a5c65e0631d6972dd19f1bd6cbe/Marlin/src/lcd/e3v2/creality"
+          curl -fsSL --retry 3 "$URL/LCD_RTS.h" -o marlin-source/LCD_RTS.h
+          curl -fsSL --retry 3 "$URL/LCD_RTS.cpp" -o marlin-source/LCD_RTS.cpp
+          test $(wc -c < marlin-source/LCD_RTS.h) -gt 8000
+          test $(wc -c < marlin-source/LCD_RTS.cpp) -gt 80000
+          sha256sum marlin-source/LCD_RTS.* > evidence112/oem_marlin_sha256.txt
+          git -C original-dgus rev-parse HEAD > evidence112/oem_dgus_commit.txt
+      - name: Generate reproducible combined DGUS experimental candidates
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python bundle112/tools/build109.py --source original-dgus --templates bundle112/OEM_MESH_OBJEKTE_106.json --out evidence112/compiled | tee evidence112/build.log
+      - name: All inherited and new regression tests
+        id: tests
+        continue-on-error: true
+        env:
+          SV04_DGUS_ORIGINAL: original-dgus
+        run: |
+          set -o pipefail
+          python -m unittest discover -s bundle112/tests -p 'test*.py' -v 2>&1 | tee evidence112/tests.log
+      - name: Independently verify OEM mesh serial and 16 screen points
+        id: audit
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python bundle112/tools/audit112.py \
+            --h marlin-source/LCD_RTS.h \
+            --cpp marlin-source/LCD_RTS.cpp \
+            --templates bundle112/OEM_MESH_OBJEKTE_106.json \
+            --art bundle112/59.jpg \
+            --candidate evidence112/compiled/EXPERIMENTELL_NICHT_INSTALLIEREN \
+            --out evidence112/contract | tee evidence112/audit.log
+      - name: Check expected output and keep verification status
+        id: finalcheck
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "build=${{ steps.build.outcome }}" > evidence112/status.txt
+          echo "tests=${{ steps.tests.outcome }}" >> evidence112/status.txt
+          echo "audit=${{ steps.audit.outcome }}" >> evidence112/status.txt
+          if test '${{ steps.build.outcome }}' = success && test '${{ steps.tests.outcome }}' = success && test '${{ steps.audit.outcome }}' = success; then
+            python - <<'PY'
+          import pathlib,json,hashlib
+          d=pathlib.Path('evidence112/compiled/EXPERIMENTELL_NICHT_INSTALLIEREN')
+          r=json.loads(pathlib.Path('evidence112/compiled/REPORT_109.json').read_text())
+          assert (d/'13TouchFile.bin').stat().st_size==7298
+          assert (d/'14ShowFile.bin').stat().st_size==23712
+          for name,key in [('13TouchFile.bin','new_touch_sha256'),('14ShowFile.bin','new_show_sha256')]:
+            assert hashlib.sha256((d/name).read_bytes()).hexdigest()==r[key]
+          assert pathlib.Path('evidence112/contract/112_OEM_DGUS_CONTRACT.json').is_file()
+          assert pathlib.Path('evidence112/contract/112_SIMULATION_ONLY.png').is_file()
+          print('112 FINAL CHECK PASS - NO FLASH APPROVAL')
+          PY
+          else
+            echo 'One or more stages failed; evidence uploaded for diagnosis.'
+            exit 1
+          fi
+      - name: Publish diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next112-dwin-evidence
+          path: |
+            evidence112/status.txt
+            evidence112/oem_dgus_commit.txt
+            evidence112/oem_marlin_sha256.txt
+            evidence112/build.log
+            evidence112/tests.log
+            evidence112/audit.log
+            evidence112/compiled/REPORT_109.json
+            evidence112/contract/
+          if-no-files-found: warn
+      - name: Publish experimental candidates - DO NOT INSTALL
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next112-dwin-experimental-NOT-FOR-INSTALL
+          path: evidence112/compiled/EXPERIMENTELL_NICHT_INSTALLIEREN/
+          if-no-files-found: warn
