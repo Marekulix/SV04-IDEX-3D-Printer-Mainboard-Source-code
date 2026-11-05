@@ -1,0 +1,97 @@
+name: 110 - SV04 NEXT DWIN combined DGUS fixed tests
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dwin-109:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+      - name: Install pillow
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Fetch exact public SV04 DGUS original
+        run: |
+          git clone https://github.com/bphillips09/SV04-Touchscreen.git original-dgus
+          cd original-dgus
+          git checkout --detach 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          test "$(git rev-parse HEAD)" = 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+      - name: Extract 109 bundle
+        run: |
+          mkdir -p bundle110 evidence110
+          unzip -q SV04_NEXT_110.zip -d bundle110
+          test -f bundle110/tools/build109.py
+          test -f bundle110/OEM_MESH_OBJEKTE_106.json
+          test -f bundle110/59.jpg
+      - name: Build combined experimental touch and show
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python bundle110/tools/build109.py \
+            --source original-dgus \
+            --templates bundle110/OEM_MESH_OBJEKTE_106.json \
+            --out evidence110/result | tee evidence110/build.log
+      - name: Host regression on pinned originals
+        id: test
+        continue-on-error: true
+        env:
+          SV04_DGUS_ORIGINAL: original-dgus
+        run: |
+          set -o pipefail
+          python -m unittest discover -s bundle110/tests -p 'test*.py' -v 2>&1 | tee evidence110/tests.log
+      - name: Cross-check report and file outputs
+        id: audit
+        continue-on-error: true
+        run: |
+          python - <<'PY' | tee evidence110/audit.log
+          import json,hashlib,pathlib,sys
+          b=pathlib.Path('evidence110/result')
+          report=json.loads((b/'REPORT_109.json').read_text())
+          folder=b/'EXPERIMENTELL_NICHT_INSTALLIEREN'
+          assert report['page59_display_objects']==16
+          assert report['new_navigation_objects']==2
+          for name,key in [('13TouchFile.bin','new_touch_sha256'),('14ShowFile.bin','new_show_sha256')]:
+              raw=(folder/name).read_bytes()
+              assert hashlib.sha256(raw).hexdigest()==report[key]
+              print(f'{name}: size={len(raw)} sha256={report[key]}')
+          print('AUDIT PASS: experimental only, not flashable')
+          PY
+      - name: Archive pinned source metadata and step status
+        if: always()
+        run: |
+          mkdir -p evidence110
+          echo 'SV04 NEXT 110 - DGUS EXPERIMENTAL ONLY - DO NOT FLASH' > evidence110/README.txt
+          echo 'Pinned upstream commit: 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4' >> evidence110/README.txt
+          echo 'build=${{ steps.build.outcome }}' >> evidence110/README.txt
+          echo 'test=${{ steps.test.outcome }}' >> evidence110/README.txt
+          echo 'audit=${{ steps.audit.outcome }}' >> evidence110/README.txt
+          if test -d original-dgus/.git; then (cd original-dgus && git rev-parse HEAD) > evidence110/source_commit.txt; else echo 'clone failed' > evidence110/source_commit.txt; fi
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next110-dwin-evidence
+          path: |
+            evidence110/README.txt
+            evidence110/source_commit.txt
+            evidence110/build.log
+            evidence110/tests.log
+            evidence110/audit.log
+            evidence110/result/REPORT_109.json
+          if-no-files-found: warn
+      - name: Upload experimental source candidates - NOT FOR INSTALL
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next110-dwin-experimental-NOT-FOR-INSTALL
+          path: evidence110/result/EXPERIMENTELL_NICHT_INSTALLIEREN/
+          if-no-files-found: warn
+      - name: Enforce result
+        if: always()
+        run: |
+          test '${{ steps.build.outcome }}' = 'success'
+          test '${{ steps.test.outcome }}' = 'success'
+          test '${{ steps.audit.outcome }}' = 'success'
