@@ -1,0 +1,143 @@
+name: '162 - SV04 NEXT full combined source + safety boundary audit (NO FLASH)'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/162.yml'
+      - 'SV04_NEXT_162.zip'
+permissions:
+  contents: read
+jobs:
+  gate162:
+    name: '01 Exhaustive C++11 fail-closed request/VP/EEPROM guards'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify immutable input packages and extract
+        run: |
+          set -euo pipefail
+          echo 'ec96ea2e423b79da2bd58e85ff15c7b7d122cdfe7f6177352de2dea3939e1420  SV04_NEXT_162.zip' | sha256sum -c -
+          echo '7bcc51ea2899beb898ae36d0e1745569fa53933ab12631fdc2b4b72c06cda17f  SV04_NEXT_161.zip' | sha256sum -c -
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_162.zip
+          mkdir -p audit162/old161 evidence162
+          unzip -oq SV04_NEXT_162.zip -d audit162
+          unzip -oq SV04_NEXT_161.zip -d audit162/old161
+      - name: C++11 diagnostics with exhaustive denial and forbidden-release mutation tests
+        run: |
+          set -euo pipefail
+          python3 audit162/audit162.py 2>&1 | tee evidence162/guards162.log
+      - name: Run original full Auto60 suite (29 host tests), with C++11 bridge fix
+        run: |
+          set -euo pipefail
+          unzip -oq SV04_NEXT_159.zip -d audit162/regression
+          cp audit162/old161/sv04_auto60_161/auto60_idex_bridge.h audit162/regression/SV04_NEXT_157/auto60_idex_bridge.h
+          (cd audit162/regression/SV04_NEXT_157 && python3 audit_all_157.py) 2>&1 | tee evidence162/regression162.log
+          cp audit162/regression/SV04_NEXT_157/AUDIT_157_TEST_RESULTS.json evidence162/regression162.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('evidence162/regression162.json'))
+          assert x['test_count']>=29 and x['test_count']==x['pass_count'],x
+          print('PASS',x['pass_count'],'of',x['test_count'])
+          PY
+      - name: Archive test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next162-cxx11-host-guard-evidence
+          path: evidence162/
+          if-no-files-found: warn
+  stm32_combined162:
+    name: '02 Real Marlin82 + Auto60157 + Diagnostics162 STM32 build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify all immutable sources
+        run: |
+          set -euo pipefail
+          echo 'ec96ea2e423b79da2bd58e85ff15c7b7d122cdfe7f6177352de2dea3939e1420  SV04_NEXT_162.zip' | sha256sum -c -
+          echo '7bcc51ea2899beb898ae36d0e1745569fa53933ab12631fdc2b4b72c06cda17f  SV04_NEXT_161.zip' | sha256sum -c -
+          echo 'a44797e80448bfa1c4fed4aef9d97ef4d7bd4b66187cb2d17fa2055f66a23781  SV04_NEXT_92.zip' | sha256sum -c -
+          mkdir -p bundle161 bundle162 evidence162
+          unzip -oq SV04_NEXT_161.zip -d bundle161
+          unzip -oq SV04_NEXT_162.zip -d bundle162
+          unzip -oq SV04_NEXT_92.zip
+          (cd SV04_NEXT_92 && sha256sum -c SHA256SUMS.txt) > evidence162/marlin92-hashes.log
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_oem
+          git -C _sv04_oem checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C _sv04_oem rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: Install PlatformIO
+        run: python3 -m pip install --break-system-packages platformio
+      - name: Stage Marlin82 then Auto60161 then Diagnostics162
+        run: |
+          set -euo pipefail
+          python3 SV04_NEXT_92/tools/integrate82.py --root _sv04_oem --out evidence162/marlin82 --build 2>&1 | tee evidence162/marlin82-integration.log
+          python3 bundle161/stage161.py --root _sv04_oem --auto60 bundle161/sv04_auto60_161 --bundle bundle161 --out evidence162
+          python3 bundle162/stage162.py --root _sv04_oem --bundle bundle162 --out evidence162
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('_sv04_oem/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          assert s.count('SV04NextAuto60Gate161.hpp')==1
+          assert s.count('SV04NextDiagnostics162.hpp')==1
+          PY
+      - name: Compile complete combined firmware, NO deployment
+        run: |
+          set -o pipefail
+          platformio run -d _sv04_oem -e STM32F103RET6_creality 2>&1 | tee evidence162/combined-stm32-build.log
+      - name: Verify strict linkage and read-only source attestation
+        run: |
+          set -euo pipefail
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin
+          python3 - <<'PY'
+          import json,pathlib,hashlib
+          a=json.load(open('evidence162/integration161.json'))
+          b=json.load(open('evidence162/integration162.json'))
+          assert a['release_allowed'] is False and a['eeprom_write_path_enabled'] is False
+          assert b['release_allowed'] is False and b['flash_approved'] is False
+          assert b['runtime_touch_event_bound'] is False and b['runtime_auto60_command_bound'] is False
+          p=pathlib.Path('_sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin')
+          print('STM32 LINK PASS:',hashlib.sha256(p.read_bytes()).hexdigest(),'NO FLASH')
+          PY
+      - name: Upload evidence only; NEVER firmware binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next162-combined-stm32-evidence-NOT-FOR-INSTALL
+          path: |
+            evidence162/**/*.log
+            evidence162/*.log
+            evidence162/*.json
+          if-no-files-found: warn
+  dwin_safety162:
+    name: '03 DWIN original inventory + explicit remaining physical blockers'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pinned DWIN source and refuse invented mapping
+        run: |
+          set -euo pipefail
+          echo '2a7230bbcb22144b0b52fae6eee41d2a3cddeb38cc2736c0325301c6bf68fc54  112_A.zip' | sha256sum -c -
+          unzip -tq 112_A.zip
+          mkdir -p evidence162
+          unzip -Z -1 112_A.zip | sort > evidence162/dwin112-inventory.txt
+          grep -Fx 'OEM_MESH_OBJEKTE_106.json' evidence162/dwin112-inventory.txt
+          grep -Fx '59.jpg' evidence162/dwin112-inventory.txt
+          cat > evidence162/RELEASE_BLOCKERS_162.md <<'BLOCKERS'
+          # SV04 NEXT 162 remaining blocking evidence
+          - DWIN original VP/Touch -> actual RX parser mapping is not proven. No touch activation.
+          - Marlin -> Auto60 real actuator callback (G28/G29/heater) is not wired. No automatic homing or probing.
+          - EEPROM backend, atomic M500 persistence, rollback and power-loss behavior not HIL-verified. No writes.
+          - 16-point probe travel and physical T0/T1 collision clearance not measured on the printer.
+          - This is compilation and simulation evidence only. DO NOT FLASH OR INSTALL.
+          BLOCKERS
+      - name: Upload DWIN/safety gap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next162-dwin-eeprom-idex-blockers
+          path: evidence162/
+          if-no-files-found: warn
