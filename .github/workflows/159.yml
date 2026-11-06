@@ -1,0 +1,96 @@
+name: '159 - SV04 NEXT Auto60 Host Audit plus Marlin DWIN NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/159.yml'
+      - 'SV04_NEXT_159.zip'
+permissions:
+  contents: read
+jobs:
+  auto60_host:
+    name: 'Auto60 135-157 host-only regression - NO FLASH'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Check package and exact SHA256'
+        run: |
+          set -euo pipefail
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_159.zip
+          mkdir -p extracted159
+          unzip -oq SV04_NEXT_159.zip -d extracted159
+          test -f extracted159/SV04_NEXT_157/audit_all_157.py
+      - name: 'Run actual host-only C++ and Python tests'
+        run: |
+          set -euo pipefail
+          python3 extracted159/SV04_NEXT_157/audit_all_157.py 2>&1 | tee auto60-testlog.txt
+          cp extracted159/SV04_NEXT_157/AUDIT_157_TEST_RESULTS.json auto60-results.json
+      - name: 'Upload evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next159-auto60-host-evidence
+          path: |
+            auto60-testlog.txt
+            auto60-results.json
+          if-no-files-found: warn
+  stm32_marlin92:
+    name: 'Existing Marlin 92 STM32 build - NOT Auto60 integrated'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Require and verify existing Marlin archive'
+        run: |
+          set -euo pipefail
+          test -s SV04_NEXT_92.zip
+          unzip -tq SV04_NEXT_92.zip
+          unzip -oq SV04_NEXT_92.zip
+          (cd SV04_NEXT_92 && sha256sum -c SHA256SUMS.txt) | tee hashes.txt
+      - name: 'Checkout pinned Sovol OEM'
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_oem
+          git -C _sv04_oem checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C _sv04_oem rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: 'Install PlatformIO'
+        run: python3 -m pip install --break-system-packages platformio
+      - name: 'Build existing Marlin 92 on STM32'
+        run: |
+          set -o pipefail
+          python3 SV04_NEXT_92/tools/integrate82.py --root _sv04_oem --out evidence159 --build 2>&1 | tee stm32-build.log
+      - name: 'Verify output - NOT FOR INSTALL'
+        run: |
+          set -euo pipefail
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf
+          sha256sum _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf
+      - name: 'Upload evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next159-marlin92-evidence-NOT-FOR-INSTALL
+          path: |
+            stm32-build.log
+            hashes.txt
+            evidence159/
+          if-no-files-found: warn
+  dwin112:
+    name: 'DWIN 112 archive integrity only'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Check existing DWIN archive'
+        run: |
+          set -euo pipefail
+          test -s 112_A.zip
+          unzip -tq 112_A.zip | tee dwin-check.txt
+      - name: 'Upload evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next159-dwin112-archive-evidence
+          path: dwin-check.txt
+          if-no-files-found: warn
