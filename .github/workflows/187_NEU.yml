@@ -1,0 +1,151 @@
+name: '187 - SV04 NEXT DWIN FULL AUDIT CORRECTED (NO FLASH)'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/187.yml'
+      - 'SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip'
+permissions:
+  contents: read
+jobs:
+  host:
+    name: '01 All offline DWIN suites 171-185 + inherited headers'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact package and extract
+        run: |
+          set -euo pipefail
+          echo 'a6e17129e47ad36e561e8ba1846f0ef97a35114ad5ead7f7210a885812b98d24  SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip' | sha256sum -c -
+          mkdir -p audit186 evidence187/host
+          unzip -tq SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip
+          unzip -q SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip -d audit186
+      - name: Python suite archive replay
+        run: |
+          set -euo pipefail
+          python3 audit186/host186.py --base audit186 --out evidence187/host 2>&1 | tee evidence187/host_runner.log
+      - name: Extract C++ inherited dependency 165
+        run: unzip -oq audit186/pkgs/SV04_NEXT_165_OFFLINE.zip -d evidence187/host/version165
+      - name: Compile and execute full standalone C++11 suite
+        run: |
+          set -euo pipefail
+          python3 audit186/cpp186.py --unpacked evidence187/host --out evidence187/cpp 2>&1 | tee evidence187/cpp_runner.log
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next187-host-regression
+          path: evidence187/
+          if-no-files-found: warn
+  hmi:
+    name: '02 Actual pinned HMI records + OEM contract'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify package and extract
+        run: |
+          set -euo pipefail
+          echo 'a6e17129e47ad36e561e8ba1846f0ef97a35114ad5ead7f7210a885812b98d24  SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip' | sha256sum -c -
+          mkdir -p audit186 evidence187/hmi
+          unzip -q SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip -d audit186
+          unzip -q audit186/pkgs/SV04_NEXT_185_DWIN_FORMAT_OFFLINE.zip -d audit186/v185
+      - name: Fetch and pin original assets
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/bphillips09/SV04-Touchscreen.git dgus
+          git -C dgus checkout --quiet --detach 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          test "$(git -C dgus rev-parse HEAD)" = 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          test "$(git -C dgus hash-object DWIN_SET/14ShowFile.bin)" = 844abd88422f98c5201245f4c1fb0ac78009112c
+          git clone --quiet https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin
+          git -C marlin checkout --quiet --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C marlin rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: Independently replay all 16 HMI objects and collision evidence
+        run: |
+          set -euo pipefail
+          python3 audit186/audit186.py --hmi dgus/DWIN_SET/14ShowFile.bin --header marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.h --cpp marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp --records audit186/OEM_DWIN_16_RECORD_SIGNATURES_187_CORRECTED.json --out evidence187/hmi/hmi186.json 2>&1 | tee evidence187/hmi/hmi.log
+          python3 - <<'PY' | tee evidence187/hmi/limitations.txt
+          print('16/16 original HMI object record prefixes identified.')
+          print('0x110E incoming ChangePageKey cannot be auto-reinterpreted as touch control.')
+          print('Signedness/decimal formatting/physical output are NOT verified.')
+          print('NO FLASH RELEASE.')
+          PY
+      - name: Archive original-source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next187-hmi-original-audit
+          path: evidence187/hmi/
+          if-no-files-found: warn
+  stm32:
+    name: '03 Pinned real STM32 cross-build + dormant DWIN patch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify bundle and pin OEM commit
+        run: |
+          set -euo pipefail
+          echo 'a6e17129e47ad36e561e8ba1846f0ef97a35114ad5ead7f7210a885812b98d24  SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip' | sha256sum -c -
+          mkdir -p audit186 evidence187/stm32
+          unzip -q SV04_NEXT_187_DWIN_GESAMTPRUEFUNG_KORREKTUR.zip -d audit186
+          unzip -q audit186/pkgs/SV04_NEXT_181_DWIN_CODEC_OFFLINE.zip -d audit186/v181
+          git clone --quiet https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin
+          git -C marlin checkout --quiet --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C marlin rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: Apply known OEM mesh adapter patch to pristine source clone
+        run: |
+          set -euo pipefail
+          cp audit186/v181/SV04NextDwinMesh181.hpp marlin/Marlin/src/lcd/e3v2/creality/
+          python3 audit186/v181/patch_oem181.py --input marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp --output evidence187/stm32/LCD_RTS_181_patched.cpp > evidence187/stm32/patch181_report.json
+          cp evidence187/stm32/LCD_RTS_181_patched.cpp marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -Fq 'SV04 NEXT 181: mesh codec integration, emission DISABLED' marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -Fq 'kEnableDwinWrites=false' marlin/Marlin/src/lcd/e3v2/creality/SV04NextDwinMesh181.hpp
+          git -C marlin diff -- Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp > evidence187/stm32/OEM_PATCH_181.diff
+      - name: Install actual ARM build toolchain through PlatformIO
+        run: python3 -m pip install platformio
+      - name: Cross-compile linked STM32 firmware - no install
+        run: |
+          set -o pipefail
+          platformio run -d marlin -e STM32F103RET6_creality 2>&1 | tee evidence187/stm32/stm32_full_build.log
+      - name: Check linked ELF + refuse shipping binaries
+        run: |
+          set -euo pipefail
+          test -s marlin/.pio/build/STM32F103RET6_creality/firmware.elf
+          test -s marlin/.pio/build/STM32F103RET6_creality/firmware.bin
+          sha256sum marlin/.pio/build/STM32F103RET6_creality/firmware.bin marlin/.pio/build/STM32F103RET6_creality/firmware.elf > evidence187/stm32/linked_sha256.txt
+          echo 'FULL STM32 BUILD PASS only. NO flash/install permission, HMI type and scale not proven.' > evidence187/stm32/NOT_FOR_INSTALL.txt
+      - name: Upload logs & patch only, NEVER firmware binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next187-stm32-build-evidence-NOT-FOR-INSTALL
+          path: evidence187/stm32/
+          if-no-files-found: warn
+  summary:
+    name: '04 Overall gate and audit summary'
+    if: always()
+    needs: [host, hmi, stm32]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record ALL job outcomes (including failure)
+        env:
+          HOST: ${{ needs.host.result }}
+          HMI: ${{ needs.hmi.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: |
+          mkdir -p overall
+          printf 'HOST=%s\nHMI=%s\nSTM32=%s\nNO_FLASH=TRUE\n' "$HOST" "$HMI" "$STM32" | tee overall/RESULT_187.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next187-GESAMTBERICHT
+          path: overall/
+      - name: Fail if any area failed
+        env:
+          HOST: ${{ needs.host.result }}
+          HMI: ${{ needs.hmi.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: |
+          test "$HOST" = success && test "$HMI" = success && test "$STM32" = success
