@@ -1,0 +1,147 @@
+name: '161 - SV04 NEXT combined Marlin Auto60 safety CI NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/161.yml'
+      - 'SV04_NEXT_161.zip'
+permissions:
+  contents: read
+jobs:
+  regression_161:
+    name: '01 C++11 guards plus complete Auto60 135-157 host regression'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Unpack and verify new immutable package'
+        run: |
+          set -euo pipefail
+          echo '7bcc51ea2899beb898ae36d0e1745569fa53933ab12631fdc2b4b72c06cda17f  SV04_NEXT_161.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_161.zip
+          mkdir -p work161 reports161
+          unzip -oq SV04_NEXT_161.zip -d work161
+      - name: 'Compile actual Auto60 + EEPROM + SD combined headers under Marlin C++11 rules'
+        run: |
+          set -euo pipefail
+          python3 work161/audit161.py | tee reports161/guards.log
+          g++ -std=c++11 -Wall -Wextra -Werror -pedantic -Iwork161 work161/test161.cpp -o reports161/test161
+          reports161/test161 | tee reports161/header161.log
+          echo 'C++11 cross-module header and fail-closed gate PASS' | tee -a reports161/header161.log
+      - name: 'Full 29-test host regression, based on corrected 157 headers'
+        run: |
+          set -euo pipefail
+          cp work161/sv04_auto60_161/auto60_idex_bridge.h /tmp/auto60_idex_bridge_161.h
+          test -s SV04_NEXT_159.zip
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          mkdir -p regression161
+          unzip -oq SV04_NEXT_159.zip -d regression161
+          cp /tmp/auto60_idex_bridge_161.h regression161/SV04_NEXT_157/auto60_idex_bridge.h
+          python3 regression161/SV04_NEXT_157/audit_all_157.py | tee reports161/host157.log
+          cp regression161/SV04_NEXT_157/AUDIT_157_TEST_RESULTS.json reports161/host157.json
+          python3 - <<'PY'
+          import json
+          r=json.load(open('reports161/host157.json'))
+          assert r['test_count']>=29 and r['test_count']==r['pass_count'],r
+          print('PASS: all',r['test_count'],'Auto60 regression programs')
+          PY
+      - name: 'Evidence archive without executables'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next161-host-guards-evidence
+          path: |
+            reports161/*.log
+            reports161/*.json
+          if-no-files-found: warn
+  combined_stm32_161:
+    name: '02 Real combined Marlin82+Auto60157 source compilation on STM32'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Load verified original source packages'
+        run: |
+          set -euo pipefail
+          echo '7bcc51ea2899beb898ae36d0e1745569fa53933ab12631fdc2b4b72c06cda17f  SV04_NEXT_161.zip' | sha256sum -c -
+          echo 'a44797e80448bfa1c4fed4aef9d97ef4d7bd4b66187cb2d17fa2055f66a23781  SV04_NEXT_92.zip' | sha256sum -c -
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          mkdir -p work161 reports161
+          unzip -oq SV04_NEXT_161.zip -d work161
+          unzip -oq SV04_NEXT_92.zip
+          (cd SV04_NEXT_92 && sha256sum -c SHA256SUMS.txt) > reports161/marlin92-package-hashes.log
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_oem
+          git -C _sv04_oem checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C _sv04_oem rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: 'Install pinned-target PlatformIO environment'
+        run: python3 -m pip install --break-system-packages platformio
+      - name: 'Verify Marlin82 integration before adding Auto60 headers'
+        run: |
+          set -o pipefail
+          python3 SV04_NEXT_92/tools/integrate82.py --root _sv04_oem --out reports161/marlin82 --build 2>&1 | tee reports161/base-marlin82.log
+      - name: 'Stage corrected Auto60 headers in actual Marlin LCD compilation unit'
+        run: |
+          set -euo pipefail
+          python3 work161/stage161.py --root _sv04_oem --auto60 work161/sv04_auto60_161 --bundle work161 --out reports161
+          python3 work161/audit161.py
+          test "$(grep -c 'SV04NextAuto60Gate161.hpp' _sv04_oem/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp)" = 1
+          test -f _sv04_oem/Marlin/src/feature/sv04_auto60_161/auto60_eeprom141.h
+      - name: 'Compile combined firmware (no released binary)'
+        run: |
+          set -o pipefail
+          platformio run -d _sv04_oem -e STM32F103RET6_creality 2>&1 | tee reports161/combined-stm32-build.log
+      - name: 'Strict combined build attestation'
+        run: |
+          set -euo pipefail
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin
+          python3 - <<'PY'
+          import json,pathlib,hashlib
+          r=json.load(open('reports161/integration161.json'))
+          assert r['release_allowed'] is False and r['eeprom_write_path_enabled'] is False
+          assert r['scope']=='READ_ONLY_COMPILE_LINKED_NO_ACTUATORS'
+          p=pathlib.Path('_sv04_oem/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          assert p.read_text().count('SV04NextAuto60Gate161.hpp')==1
+          p=pathlib.Path('_sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin')
+          print('STM32 BUILD PASS; SHA256',hashlib.sha256(p.read_bytes()).hexdigest(),'NO FLASH APPROVAL')
+          PY
+      - name: 'Archive safe source/diagnostics ONLY, never binary'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next161-combined-stm32-evidence-NOT-FOR-INSTALL
+          path: |
+            reports161/**/*.log
+            reports161/*.json
+            reports161/*.log
+          if-no-files-found: warn
+  dwin_eeprom_gaps_161:
+    name: '03 DWIN/EEPROM/IDEX release-blocker audit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Check original DWIN 112 inventory without inventing VP mapping'
+        run: |
+          set -euo pipefail
+          echo '2a7230bbcb22144b0b52fae6eee41d2a3cddeb38cc2736c0325301c6bf68fc54  112_A.zip' | sha256sum -c -
+          unzip -tq 112_A.zip
+          mkdir -p report161
+          unzip -Z -1 112_A.zip | sort > report161/dwin-inventory.txt
+          grep -Fx 'OEM_MESH_OBJEKTE_106.json' report161/dwin-inventory.txt
+          grep -Fx '59.jpg' report161/dwin-inventory.txt
+          cat > report161/RELEASE_BLOCKERS.md <<'EOF'
+          # SV04 NEXT 161: unresolved real-device release blockers
+          - DWIN: authentic touch event -> verified VP -> Marlin handler -> state transition has NOT been proven. Disabled.
+          - Auto60: no permitted real bed heater, G28, G29, G29 callbacks, or sensor control path. Disabled.
+          - EEPROM: M500 durability, exact Marlin backend, independent read-only decoder and power-loss restore NOT proven. Disabled.
+          - IDEX: real T0/T1 physical envelope, endstop trust after manual movement, and 16-point BLTouch traversal NOT proven.
+          - Complete firmware has NOT been tested on printer, NO flashing allowed.
+          EOF
+      - name: 'Upload explicit coverage gaps and DWIN originals list'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next161-dwin-eeprom-idex-gaps
+          path: report161/
+          if-no-files-found: warn
