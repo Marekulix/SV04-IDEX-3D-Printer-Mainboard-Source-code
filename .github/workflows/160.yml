@@ -1,0 +1,146 @@
+name: '160 - SV04 NEXT Gesamtpruefung Marlin DWIN Auto60 EEPROM IDEX NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/160.yml'
+      - 'SV04_NEXT_160.zip'
+permissions:
+  contents: read
+jobs:
+  inventory_and_safety:
+    name: '01 Complete package integrity and hardware gap report'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Verify new audit package integrity'
+        run: |
+          set -euo pipefail
+          echo '025bdfc6bb74ef7b9eb0626e3fae2174da4eb25a143786f4ce0b185363f5b07e  SV04_NEXT_160.zip' | sha256sum -c -
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_160.zip
+          mkdir -p checker160 report160
+          unzip -oq SV04_NEXT_160.zip -d checker160
+      - name: 'Audit all available packages, scope, hardware constraints'
+        run: |
+          set -euo pipefail
+          python3 checker160/audit160.py --root . --out report160
+          cat report160/REPORT_160.md
+      - name: 'Upload overall coverage report'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'sv04next160-total-audit'
+          path: report160/
+          if-no-files-found: warn
+  auto60_host:
+    name: '02 Auto60 135-157 complete host regression'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Verify and unpack exact Auto60 159 sources'
+        run: |
+          set -euo pipefail
+          echo '3cabcafaf3debb9011d29a5adc6ac27d957975d483ed60cb2c1b43f3729e6e15  SV04_NEXT_159.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_159.zip
+          mkdir -p source160 result160
+          unzip -oq SV04_NEXT_159.zip -d source160
+          test -f source160/SV04_NEXT_157/audit_all_157.py
+      - name: 'Run C++ simulation/host regression including all point scenarios'
+        run: |
+          set -euo pipefail
+          python3 source160/SV04_NEXT_157/audit_all_157.py 2>&1 | tee result160/auto60-testlog.txt
+          cp source160/SV04_NEXT_157/AUDIT_157_TEST_RESULTS.json result160/auto60-results.json
+          python3 - <<'PY'
+          import json
+          a=json.load(open('result160/auto60-results.json'))
+          assert a['test_count']==a['pass_count'], a
+          assert a['test_count'] >= 29, a
+          print('AUTO60 HOST PASS', a['pass_count'], 'of', a['test_count'])
+          PY
+      - name: 'Upload Auto60 regression evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'sv04next160-auto60-host-tests'
+          path: result160/
+          if-no-files-found: warn
+  marlin_stm32:
+    name: '03 Marlin92 native source application and real STM32 build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Validate existing Marlin 92 package and own manifest'
+        run: |
+          set -euo pipefail
+          test -s SV04_NEXT_92.zip
+          unzip -tq SV04_NEXT_92.zip
+          unzip -oq SV04_NEXT_92.zip
+          (cd SV04_NEXT_92 && sha256sum -c SHA256SUMS.txt) | tee marlin-hashes160.txt
+          test -f SV04_NEXT_92/tools/integrate82.py
+      - name: 'Get pinned original SV04 firmware source'
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git _sv04_oem
+          git -C _sv04_oem checkout --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C _sv04_oem rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: 'Install toolchain'
+        run: python3 -m pip install --break-system-packages platformio
+      - name: 'Full tracked source audit, C++11 test and STM32 firmware build'
+        run: |
+          set -o pipefail
+          python3 SV04_NEXT_92/tools/integrate82.py --root _sv04_oem --out evidence160 --build 2>&1 | tee stm32-build160.log
+      - name: 'Enforce machine build results and artifact provenance'
+        run: |
+          set -euo pipefail
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin
+          test -s _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf
+          python3 - <<'PY'
+          import json
+          a=json.load(open('evidence160/integration82.json'))
+          for key in ('source_audit_passed','export_roundtrip_verified','cxx11_combined_header_compile_passed','stm32_build_success'):
+            assert a.get(key) is True,(key,a.get(key))
+          assert a.get('scope')=='POINT_1_MARLIN_ONLY'
+          print('MARLIN BUILD PASS: point 1 only. NOT Auto60 combined, NOT flash-ready')
+          PY
+          sha256sum _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.bin _sv04_oem/.pio/build/STM32F103RET6_creality/firmware.elf > firmware-hashes160.txt
+      - name: 'Upload Marlin audit evidence WITHOUT flash binary'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'sv04next160-marlin-build-NOT-FOR-INSTALL'
+          path: |
+            marlin-hashes160.txt
+            firmware-hashes160.txt
+            stm32-build160.log
+            evidence160/
+          if-no-files-found: warn
+  dwin_integrity:
+    name: '04 DWIN 112 archive integrity + asset inventory (no hardware claim)'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Inspect DWIN archive and list asset candidates'
+        run: |
+          set -euo pipefail
+          test -s 112_A.zip
+          mkdir -p dwin160
+          unzip -tq 112_A.zip | tee dwin160/integrity.log
+          unzip -Z -1 112_A.zip | sort > dwin160/archive_entries.txt
+          python3 - <<'PY'
+          import pathlib
+          x=pathlib.Path('dwin160/archive_entries.txt').read_text().splitlines()
+          assert x,'empty DWIN archive'
+          pathlib.Path('dwin160/SCOPE.md').write_text('# DWIN 112\nArchive contents verified: '+str(len(x))+' entries.\nNo live VP navigation, display compatibility, touch-button activation, EEPROM or safety approval established.\n')
+          PY
+      - name: 'Upload DWIN evidence'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'sv04next160-dwin-archive-evidence'
+          path: dwin160/
+          if-no-files-found: warn
