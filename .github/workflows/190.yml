@@ -1,0 +1,177 @@
+name: '190 - SV04 NEXT DWIN GESAMTPRUEFUNG (NO FLASH)'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/190.yml'
+      - 'SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip'
+permissions:
+  contents: read
+jobs:
+  host:
+    name: '01 All offline DWIN suites 171-185 + inherited headers'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check exact unique 190 package and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip || { echo '::error::Upload new 190 ZIP into repository root'; exit 1; }
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip
+      - name: Verify 190 package and extract
+        run: |
+          set -euo pipefail
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          mkdir -p audit190 evidence190/host
+          unzip -tq SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip
+          unzip -q SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip -d audit190
+      - name: Python suite archive replay
+        run: |
+          set -euo pipefail
+          python3 audit190/host186.py --base audit190 --out evidence190/host 2>&1 | tee evidence190/host_runner.log
+      - name: Extract C++ inherited dependency 165
+        run: unzip -oq audit190/pkgs/SV04_NEXT_165_OFFLINE.zip -d evidence190/host/version165
+      - name: Compile and execute full standalone C++11 suite
+        run: |
+          set -euo pipefail
+          python3 audit190/cpp186.py --unpacked evidence190/host --out evidence190/cpp 2>&1 | tee evidence190/cpp_runner.log
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next190-host-regression
+          path: evidence190/
+          if-no-files-found: warn
+  hmi:
+    name: '02 Actual pinned HMI records + OEM contract'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check exact unique 190 package and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip || { echo '::error::Upload new 190 ZIP into repository root'; exit 1; }
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip
+      - name: Verify 190 package and extract
+        run: |
+          set -euo pipefail
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          mkdir -p audit190 evidence190/hmi
+          unzip -q SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip -d audit190
+          unzip -q audit190/pkgs/SV04_NEXT_185_DWIN_FORMAT_OFFLINE.zip -d audit190/v185
+      - name: Fetch and pin original assets
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/bphillips09/SV04-Touchscreen.git dgus
+          git -C dgus checkout --quiet --detach 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          test "$(git -C dgus rev-parse HEAD)" = 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          test "$(git -C dgus hash-object DWIN_SET/14ShowFile.bin)" = 844abd88422f98c5201245f4c1fb0ac78009112c
+          git clone --quiet https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin
+          git -C marlin checkout --quiet --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C marlin rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: Independently replay all 16 HMI objects and collision evidence
+        run: |
+          set -euo pipefail
+          python3 audit190/audit186.py --hmi dgus/DWIN_SET/14ShowFile.bin --header marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.h --cpp marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp --records audit190/OEM_DWIN_16_RECORD_SIGNATURES_187_CORRECTED.json --out evidence190/hmi/hmi186.json 2>&1 | tee evidence190/hmi/hmi.log
+          python3 - <<'PY' | tee evidence190/hmi/limitations.txt
+          print('16/16 original HMI object record prefixes identified.')
+          print('0x110E incoming ChangePageKey cannot be auto-reinterpreted as touch control.')
+          print('Signedness/decimal formatting/physical output are NOT verified.')
+          print('NO FLASH RELEASE.')
+          PY
+      - name: Archive original-source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next190-hmi-original-audit
+          path: evidence190/hmi/
+          if-no-files-found: warn
+  stm32:
+    name: '03 Pinned real STM32 cross-build + NEW mesh capture hook 190'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check exact unique 190 package and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip || { echo '::error::Upload new 190 ZIP into repository root'; exit 1; }
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          unzip -tq SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip
+      - name: Verify 190 bundle and pin OEM commit
+        run: |
+          set -euo pipefail
+          echo '586627054dcaf6ac56f9e030e8e23687950f7d4895e0b86eb06df03519261ddb  SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          mkdir -p audit190 evidence190/stm32
+          unzip -q SV04_NEXT_190_DWIN_GESAMTPRUEFUNG.zip -d audit190
+          git clone --quiet https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin
+          git -C marlin checkout --quiet --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C marlin rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+      - name: Apply NEW 190 bilinear mesh snapshot hook to pinned original Marlin
+        run: |
+          set -euo pipefail
+          cp audit190/v190/SV04NextMesh190.hpp marlin/Marlin/src/lcd/e3v2/creality/
+          python3 audit190/v190/patch_oem190.py --input marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp --output evidence190/stm32/LCD_RTS_190_patched.cpp | tee evidence190/stm32/patch190_report.json
+          cp evidence190/stm32/LCD_RTS_190_patched.cpp marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -Fq 'SV04 NEXT 190: OEM bilinear mesh snapshot hook' marlin/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -Fq 'kDwinEmissionEnabled=false' marlin/Marlin/src/lcd/e3v2/creality/SV04NextMesh190.hpp
+          git -C marlin diff -- Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp > evidence190/stm32/OEM_PATCH_190.diff
+      - name: Compile and run NEW 190 snapshot unit tests
+        run: |
+          set -euo pipefail
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic -I audit190/v190 audit190/v190/test190.cpp -o /tmp/sv04test190
+          /tmp/sv04test190
+          echo 'NEW 190 HOST SNAPSHOT TEST PASS' | tee evidence190/stm32/host190.txt
+      - name: Install actual ARM build toolchain through PlatformIO
+        run: python3 -m pip install platformio
+      - name: Cross-compile linked STM32 firmware - no install
+        run: |
+          set -o pipefail
+          platformio run -d marlin -e STM32F103RET6_creality 2>&1 | tee evidence190/stm32/stm32_full_build.log
+      - name: Check linked ELF + refuse shipping binaries
+        run: |
+          set -euo pipefail
+          test -s marlin/.pio/build/STM32F103RET6_creality/firmware.elf
+          test -s marlin/.pio/build/STM32F103RET6_creality/firmware.bin
+          sha256sum marlin/.pio/build/STM32F103RET6_creality/firmware.bin marlin/.pio/build/STM32F103RET6_creality/firmware.elf > evidence190/stm32/linked_sha256.txt
+          echo 'FULL STM32 BUILD PASS only. NO flash/install permission, HMI type and scale not proven.' > evidence190/stm32/NOT_FOR_INSTALL.txt
+      - name: Upload logs & patch only, NEVER firmware binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next190-stm32-build-evidence-NOT-FOR-INSTALL
+          path: evidence190/stm32/
+          if-no-files-found: warn
+  summary:
+    name: '04 Overall gate and audit summary'
+    if: always()
+    needs: [host, hmi, stm32]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record ALL job outcomes (including failure)
+        env:
+          HOST: ${{ needs.host.result }}
+          HMI: ${{ needs.hmi.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: |
+          mkdir -p overall
+          printf 'HOST=%s\nHMI=%s\nSTM32=%s\nNO_FLASH=TRUE\n' "$HOST" "$HMI" "$STM32" | tee overall/RESULT_190.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next190-GESAMTBERICHT
+          path: overall/
+      - name: Fail if any area failed
+        env:
+          HOST: ${{ needs.host.result }}
+          HMI: ${{ needs.hmi.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: |
+          test "$HOST" = success && test "$HMI" = success && test "$STM32" = success
