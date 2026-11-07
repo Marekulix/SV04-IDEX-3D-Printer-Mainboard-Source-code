@@ -1,0 +1,130 @@
+name: '230 - SV04 NEXT Claude/DWIN STM32 AUDIT - NO FLASH'
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/230.yml'
+      - 'SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip'
+permissions:
+  contents: read
+jobs:
+  host:
+    name: '01 Hosttests Claude 194-196 und Display 228'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate unique ZIP and unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8a5b32cabc135928c132073fc4d8a6f05840b93d3ce5818479be1c6893d54975  SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          unzip -tq 'SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip'
+          mkdir -p work230 evidence230/host
+          unzip -q 'SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip' -d work230
+          unzip -q work230/inputs/CLAUDE_194_196_ORIGINAL.zip -d work230/claude
+          unzip -q work230/inputs/SV04_NEXT_228_ORIGINAL.zip -d work230/display
+      - name: Run Claude host suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s work230/claude/tests -p 'test_*.py' -v 2>&1 | tee evidence230/host/claude_tests.log
+      - name: Compile/run Claude C++11 session unit
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic -I work230/claude/overlay work230/claude/tests/test_194_session_unit.cpp -o /tmp/sv04_230_session
+          /tmp/sv04_230_session 2>&1 | tee evidence230/host/claude_session.log
+      - name: Display 228 isolated regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd work230/display && python3 test228.py) 2>&1 | tee evidence230/host/display228.log
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic -I work230/display work230/display/test228.cpp -o /tmp/sv04_230_display
+          /tmp/sv04_230_display 2>&1 | tee evidence230/host/display228_cpp.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next230-host-evidence
+          path: evidence230/host/
+          if-no-files-found: warn
+  stm32:
+    name: '02 Pinned original Marlin baseline and guarded Claude patch cross-build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ZIP and extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8a5b32cabc135928c132073fc4d8a6f05840b93d3ce5818479be1c6893d54975  SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip' | sha256sum -c -
+          mkdir -p work230 evidence230/stm32
+          unzip -q 'SV04_NEXT_230_GITHUB_GESAMTPRUEFUNG.zip' -d work230
+          unzip -q work230/inputs/CLAUDE_194_196_ORIGINAL.zip -d work230/claude
+      - name: Clone exact OEM snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin230
+          git -C marlin230 checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C marlin230 rev-parse HEAD)" = 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          echo '6a5793e661777c7344ea7fda9a2f99228046d57660a39d98c64fd2110f59d2da  marlin230/Marlin/src/gcode/bedlevel/abl/G29.cpp' | sha256sum -c -
+          echo '06a6e98d4804d74c412482e8a11702b0aee3add4c1c082c2c0690b7569bee41a  marlin230/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c -
+          git -C marlin230 rev-parse HEAD > evidence230/stm32/oem_commit.txt
+      - name: Install compiler through PlatformIO
+        run: python3 -m pip install platformio
+      - name: Baseline build OEM
+        shell: bash
+        run: |
+          set -o pipefail
+          platformio run -d marlin230 -e STM32F103RET6_creality 2>&1 | tee evidence230/stm32/baseline.log
+          sha256sum marlin230/.pio/build/STM32F103RET6_creality/firmware.elf marlin230/.pio/build/STM32F103RET6_creality/firmware.bin > evidence230/stm32/baseline_sha256.txt
+      - name: Patch isolated OEM copy, no default rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 work230/claude/tools/patch194.py --lcd-oem marlin230/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp --g29-oem marlin230/Marlin/src/gcode/bedlevel/abl/G29.cpp --out patched230 --report evidence230/stm32/patch_report.json
+          cp -r patched230/Marlin/src/. marlin230/Marlin/src/
+          git -C marlin230 diff -- Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp > evidence230/stm32/patch.diff
+          echo 'NO_FLASH, CLAUDE DEFAULT ROLLBACK DISABLED BY BUILD FLAGS' > evidence230/stm32/NOT_FOR_INSTALL.txt
+      - name: STM32 guarded patched build
+        shell: bash
+        env:
+          PLATFORMIO_BUILD_FLAGS: '-DSV04NEXT_G29_FAILSAFE_194=0 -DSV04NEXT_G29_RESEND_194=0 -DSV04NEXT_G29_GUARD_LIVE_194=0'
+        run: |
+          set -o pipefail
+          platformio run -d marlin230 -e STM32F103RET6_creality 2>&1 | tee evidence230/stm32/patched.log
+          test -s marlin230/.pio/build/STM32F103RET6_creality/firmware.elf
+          sha256sum marlin230/.pio/build/STM32F103RET6_creality/firmware.elf marlin230/.pio/build/STM32F103RET6_creality/firmware.bin > evidence230/stm32/patched_sha256.txt
+      - name: Archive logs ONLY, no firmware binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sv04next230-stm32-evidence-NOT-FOR-INSTALL
+          path: evidence230/stm32/
+          if-no-files-found: warn
+  summary:
+    name: '03 Audit summary (even on failure)'
+    if: always()
+    needs: [host, stm32]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record status
+        env:
+          HOST: ${{ needs.host.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: |
+          mkdir -p summary230
+          printf 'HOST=%s\nSTM32=%s\nNOT_MERGED_UI_197_228=TRUE\nNO_FLASH=TRUE\n' "$HOST" "$STM32" > summary230/RESULT_230.txt
+          cat summary230/RESULT_230.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next230-GESAMTBERICHT
+          path: summary230/
+      - name: Fail if any job failed
+        env:
+          HOST: ${{ needs.host.result }}
+          STM32: ${{ needs.stm32.result }}
+        run: test "$HOST" = success && test "$STM32" = success
