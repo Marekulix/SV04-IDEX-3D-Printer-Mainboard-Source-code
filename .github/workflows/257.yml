@@ -1,0 +1,140 @@
+name: '257 - SV04 NEXT GROSSKORREKTUR OEM + MARLIN + DWIN - NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host_and_dwin:
+    name: '257 Host + DGUS_36 ICL + vollständige Regression'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack input and verify all 85 file hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v257 evidence257/host
+          unzip -tq SV04_NEXT_257_GROSSKORREKTUR_DWIN_MARLIN_NO_FLASH.zip
+          unzip -q SV04_NEXT_257_GROSSKORREKTUR_DWIN_MARLIN_NO_FLASH.zip -d v257
+          python3 v257/verify_package257.py v257 | tee evidence257/host/integrity.txt
+      - name: Verify rebuilt image library and 59 original JPEG payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install 'Pillow==11.3.0'
+          python3 v257/verify_icl257.py | tee evidence257/host/dwin_rebuild.txt
+          sha256sum v257/dwin257/*.bin v257/dwin257/*.icl | tee evidence257/host/dwin_hashes.txt
+      - name: Compile and execute new 257 integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic v257/test257.cpp -o /tmp/sv04next257_test
+          /tmp/sv04next257_test | tee evidence257/host/test257.txt
+      - name: Run historical 244 through 255 host suite and save each failure
+        shell: bash
+        run: |
+          set +e
+          python3 v257/host256.py evidence257/host/regressions
+          rc=$?
+          echo "REGRESSION_EXIT=$rc" | tee evidence257/host/exit.txt
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next257-HOST-DWIN-COMBINED
+          path: evidence257/host/
+          if-no-files-found: warn
+  stm32:
+    name: '257 STM32 ${{ matrix.variant }}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [oem, merged_safe, full_compile_probe]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify input archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v257 evidence257/stm32
+          unzip -tq SV04_NEXT_257_GROSSKORREKTUR_DWIN_MARLIN_NO_FLASH.zip
+          unzip -q SV04_NEXT_257_GROSSKORREKTUR_DWIN_MARLIN_NO_FLASH.zip -d v257
+          python3 v257/verify_package257.py v257 | tee evidence257/stm32/input_hash.txt
+      - name: Clone immutable OEM Marlin source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin257
+          git -C marlin257 checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          git -C marlin257 rev-parse HEAD | tee evidence257/stm32/oem_commit.txt
+      - name: Apply corrected overlay / variant flags
+        env:
+          MODE: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 v257/batch257.py marlin257 --mode "$MODE" --report evidence257/stm32/overlay_flags.json
+          git -C marlin257 diff --stat | tee evidence257/stm32/source_changes.txt
+          git -C marlin257 diff --check | tee evidence257/stm32/diffcheck.txt
+          grep -n 'class SV04NextLockedCommands255' marlin257/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp > evidence257/stm32/actuation_still_locked.txt || true
+      - name: Install pinned PlatformIO for actual STM32 build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install 'platformio==6.1.18'
+          python3 -m platformio --version | tee evidence257/stm32/tool_version.txt
+      - name: Compile STM32F103RET6_creality; never expose flash binary
+        shell: bash
+        run: |
+          set +e
+          python3 -m platformio run -d marlin257 -e STM32F103RET6_creality > evidence257/stm32/full_build.log 2>&1
+          rc=$?
+          tail -n 100 evidence257/stm32/full_build.log
+          printf 'BUILD_EXIT=%s\nMODE=${{ matrix.variant }}\nFLASH_RELEASE=NO\n' "$rc" | tee evidence257/stm32/result.txt
+          grep -nE 'fatal error:|error:|undefined reference|FAILED|SUCCESS' evidence257/stm32/full_build.log > evidence257/stm32/compiler_diagnostics.txt || true
+          if [ "$rc" -eq 0 ] && [ -f marlin257/.pio/build/STM32F103RET6_creality/firmware.elf ]; then
+            sha256sum marlin257/.pio/build/STM32F103RET6_creality/firmware.elf > evidence257/stm32/elf_checksum.txt
+            (command -v arm-none-eabi-size && arm-none-eabi-size marlin257/.pio/build/STM32F103RET6_creality/firmware.elf) > evidence257/stm32/memory.txt 2>&1 || true
+          fi
+          # In particular, full_compile_probe FORCES an unverified ICL gate and
+          # is diagnostically useful but never an installable release.
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next257-STM32-${{ matrix.variant }}-LOGS-ONLY
+          path: evidence257/stm32/
+          if-no-files-found: warn
+  summary:
+    name: '257 Gesamtbericht - release always locked'
+    runs-on: ubuntu-24.04
+    needs: [host_and_dwin, stm32]
+    if: always()
+    steps:
+      - name: Report without making unsupported release claims
+        env:
+          HOST: ${{ needs.host_and_dwin.result }}
+          STM32: ${{ needs.stm32.result }}
+        shell: bash
+        run: |
+          mkdir -p evidence257/summary
+          {
+            echo 'SV04 NEXT 257 GROSSKORREKTUR'
+            echo "HOST_AND_DWIN=$HOST"
+            echo "STM32_MATRIX=$STM32"
+            echo 'DWIN_ICL=REVERSE_ENGINEERED_NOT_EDITOR_VERIFIED'
+            echo 'MARLIN_MACHINE=LOCKED_BACKEND'
+            echo 'IDEX_PROOF=NOT_IMPLEMENTED'
+            echo 'INDEPENDENT_EEPROM_READ=NOT_IMPLEMENTED'
+            echo 'HARDWARE_TEST=NOT_RUN'
+            echo 'INSTALLABLE=NO'
+            echo 'FLASH_PERMISSION=NO'
+          } | tee evidence257/summary/RESULT.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next257-GESAMTBERICHT
+          path: evidence257/summary/
