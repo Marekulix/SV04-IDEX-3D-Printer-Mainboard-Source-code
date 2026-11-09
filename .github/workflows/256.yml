@@ -1,0 +1,166 @@
+name: '256 - SV04 NEXT GROSSANGRIFF Gesamtbuild + DWIN + Safety - NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    name: 'Host: alle Regressionen 244-255'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack exact V256 input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v256 evidence256/host
+          unzip -tq SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip
+          unzip -q SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip -d v256
+          python3 v256/verify_package256.py v256 2>&1 | tee evidence256/host/input_integrity.txt
+      - name: Run all host tests even when individual tests fail
+        shell: bash
+        run: |
+          set +e
+          python3 v256/host256.py evidence256/host
+          rc=$?
+          echo "HOST_TEST_EXIT=$rc" | tee evidence256/host/status.txt
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next256-HOST-ALL-REGRESSIONS
+          path: evidence256/host/
+          if-no-files-found: warn
+  stm32:
+    name: 'STM32: ${{ matrix.variant }}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [oem, merged_safe, observer, full_diagnostic, full_compile_probe]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack and verify package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v256 evidence256/stm32
+          unzip -tq SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip
+          unzip -q SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip -d v256
+          python3 v256/verify_package256.py v256 > evidence256/stm32/input_integrity.json
+      - name: Clone pinned original full Marlin project
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git marlin256
+          git -C marlin256 checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          git -C marlin256 rev-parse HEAD | tee evidence256/stm32/oem_revision.txt
+      - name: Overlay exact V255 sources and set A/B/diagnostic gates
+        shell: bash
+        env:
+          MODE: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python3 v256/batch256.py marlin256 --mode "$MODE" --report evidence256/stm32/overlay_and_flags.json
+          git -C marlin256 diff --stat > evidence256/stm32/diffstat.txt
+          git -C marlin256 diff --check > evidence256/stm32/diffcheck.txt
+          # Do not pretend a source checksum check means that action hooks are implemented.
+          grep -R -n 'return false;.*' v256/firmware/Marlin/src/lcd/e3v2/creality/SV04NextMachineProof255.hpp > evidence256/stm32/fail_closed_hooks.txt || true
+      - name: Install pinned build tool and record versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install 'platformio==6.1.18'
+          python3 -m platformio --version | tee evidence256/stm32/tool_versions.txt
+          python3 --version >> evidence256/stm32/tool_versions.txt
+          g++ --version | head -1 >> evidence256/stm32/tool_versions.txt
+      - name: Full STM32F103RET6_creality build and collect actual errors
+        shell: bash
+        run: |
+          set +e
+          python3 -m platformio run -d marlin256 -e STM32F103RET6_creality > evidence256/stm32/build_full.log 2>&1
+          rc=$?
+          tail -n 160 evidence256/stm32/build_full.log
+          printf 'VARIANT=${{ matrix.variant }}\nBUILD_EXIT=%s\nNO_FLASH=YES\nRELEASE=NO\n' "$rc" > evidence256/stm32/result.txt
+          grep -E -n 'fatal error:|error:|undefined reference|FAILED|SUCCESS' evidence256/stm32/build_full.log > evidence256/stm32/errors_and_result.txt || true
+          if [ "$rc" -eq 0 ]; then
+            if [ -s marlin256/.pio/build/STM32F103RET6_creality/firmware.elf ]; then
+              sha256sum marlin256/.pio/build/STM32F103RET6_creality/firmware.elf > evidence256/stm32/elf_sha256.txt
+              (command -v arm-none-eabi-size && arm-none-eabi-size marlin256/.pio/build/STM32F103RET6_creality/firmware.elf) > evidence256/stm32/memory_size.txt 2>&1 || true
+            fi
+          fi
+          # Never upload a .bin, .hex, .elf or other flashable image.
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next256-STM32-${{ matrix.variant }}-LOGS-ONLY
+          path: evidence256/stm32/
+          if-no-files-found: warn
+  dwin:
+    name: 'DWIN: Original ICL + 13/14 + neue Bild-Blocker'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract verified input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v256 evidence256/dwin
+          unzip -tq SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip
+          unzip -q SV04_NEXT_256_GROSSANGRIFF_GESAMTBUILD.zip -d v256
+          python3 v256/verify_package256.py v256 > evidence256/dwin/input_integrity.json
+      - name: Fetch untouched original DGUS image library, exact pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/bphillips09/SV04-Touchscreen.git dwin256
+          git -C dwin256 checkout -q --detach 5a3fae8c1ccdc04fb3372c077a61394e8a66ece4
+          python3 v256/dwin256.py dwin256 --out evidence256/dwin/identity_and_blockers.json
+          sha256sum dwin256/DWIN_SET/32_main.icl > evidence256/dwin/original_icl_sha256.txt
+          wc -c dwin256/DWIN_SET/32_main.icl > evidence256/dwin/original_icl_size.txt
+          cp dwin256/DWIN_SET/32_main.icl evidence256/dwin/32_main_ORIGINAL_NOT_MODIFIED.icl
+          cp v256/dwin/*.jpg evidence256/dwin/
+          cp v256/dwin/13TouchFile.bin evidence256/dwin/13TouchFile_EXPERIMENTAL_NO_FLASH.bin
+          cp v256/dwin/14ShowFile.bin evidence256/dwin/14ShowFile_EXPERIMENTAL_NO_FLASH.bin
+          echo 'Original ICL not merged with JPG 59-63. Experimental 13/14 are NOT validated on DWIN. NO FLASH.' > evidence256/dwin/NO_FLASH.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next256-DWIN-ORIGINAL-ICL-AND-OBJECT-EVIDENCE-NO-FLASH
+          path: evidence256/dwin/
+          if-no-files-found: warn
+  summary:
+    name: 'ALL checks / next consolidated fixes'
+    runs-on: ubuntu-24.04
+    if: always()
+    needs: [host, stm32, dwin]
+    steps:
+      - name: Overall outcome including mandatory NOT READY state
+        env:
+          HOST: ${{ needs.host.result }}
+          STM32: ${{ needs.stm32.result }}
+          DWIN: ${{ needs.dwin.result }}
+        shell: bash
+        run: |
+          mkdir -p evidence256/summary
+          {
+            echo "SV04 NEXT 256 COMBINED AUDIT"
+            echo "HOST=$HOST"
+            echo "STM32_MATRIX=$STM32"
+            echo "DWIN=$DWIN"
+            echo "HARDWARE_VALIDATION=NOT_RUN"
+            echo "MACHINE_SAFETY=NOT_VERIFIED"
+            echo "NEW_DWIN_ICL=NOT_COMPILED"
+            echo "INSTALLABLE_FIRMWARE=NO"
+            echo "FLASH_PERMISSION=NO"
+          } | tee evidence256/summary/RESULT.txt
+          printf 'Next fix batch: compiler/link errors from full_diagnostic; independent EEPROM and motion proofs; DWIN image library creation, then rerun all variants.\n' > evidence256/summary/NEXT_FIX_BATCH.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sv04next256-GESAMTBERICHT
+          path: evidence256/summary/
