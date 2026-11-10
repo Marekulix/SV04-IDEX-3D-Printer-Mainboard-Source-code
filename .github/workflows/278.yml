@@ -1,0 +1,117 @@
+name: '278 - SV04 P1 276 + M420 V5 STM32 - NO FLASH'
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  point1_build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout your repository
+        uses: actions/checkout@v4
+
+      - name: Verify source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence point1
+          test -f SV04_NEXT_278.zip || {
+            echo 'ERROR: Upload SV04_NEXT_278.zip into repository root first'
+            exit 1
+          }
+          echo "5fb514c797de7c404e27f31814fe545caa58484fe2835a18a5746e0a374445bb  SV04_NEXT_278.zip" | sha256sum -c - | tee evidence/source_sha256_verified.txt
+          unzip -t SV04_NEXT_278.zip | tee evidence/archive_check.txt
+          unzip -q SV04_NEXT_278.zip -d point1
+          sha256sum SV04_NEXT_278.zip | tee evidence/source_checksum.txt
+
+      - name: Run patch tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd point1
+          python3 -m unittest -v test_268.py test_272.py test_274.py test_275.py test_276.py 2>&1 | tee ../evidence/patch_tests.txt
+
+      - name: Clone immutable Sovol OEM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_revision.txt
+
+      - name: Patch real OEM G28 and verify diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/apply_268.py \
+            oem/Marlin/src/gcode/calibrate/G28.cpp \
+            --verify-oem \
+            --out oem/Marlin/src/gcode/calibrate/G28.cpp.patched
+          mv oem/Marlin/src/gcode/calibrate/G28.cpp.patched oem/Marlin/src/gcode/calibrate/G28.cpp
+          python3 point1/apply_272.py \
+            oem/Marlin/src/gcode/calibrate/G28.cpp \
+            --out oem/Marlin/src/gcode/calibrate/G28.cpp.patched
+          mv oem/Marlin/src/gcode/calibrate/G28.cpp.patched oem/Marlin/src/gcode/calibrate/G28.cpp
+          grep -nF 'x_home_pos(1)' oem/Marlin/src/gcode/calibrate/G28.cpp | tee evidence/override_home_reference.txt
+          python3 point1/apply_274.py --root oem | tee evidence/patch274_apply.txt
+          python3 point1/apply_275.py oem/Marlin/src/gcode/calibrate/G28.cpp | tee evidence/patch275_apply.txt
+          python3 point1/apply_276.py --root oem | tee evidence/patch276_apply.txt
+          python3 point1/audit_modes_275.py oem | tee evidence/ideX_modes_audit.txt
+          grep -nF 'sv04_p1_z_completed' oem/Marlin/src/gcode/calibrate/G28.cpp | tee evidence/z_homing_completion.txt
+          grep -nF 'sv04_p1_t1_x_completed' oem/Marlin/src/module/motion.cpp | tee evidence/t1_homing_completion.txt
+          grep -nF 'sv04_p1_t0_x_completed' oem/Marlin/src/module/motion.cpp | tee evidence/t0_homing_completion.txt
+          git -C oem diff -- Marlin/src/module/motion.cpp Marlin/src/module/motion.h > evidence/motion_patch.diff
+          test -s evidence/motion_patch.diff
+          git -C oem diff --check
+          git -C oem diff -- Marlin/src/gcode/calibrate/G28.cpp > evidence/patch.diff
+          test -s evidence/patch.diff
+          sha256sum oem/Marlin/src/gcode/calibrate/G28.cpp | tee evidence/patched_file_checksum.txt
+
+      - name: Install and verify M420 guards V2 V4 V5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/m420/test_m420_v4.py 2>&1 | tee evidence/m420_v4_tests.txt
+          python3 point1/m420/test_m420_v5.py 2>&1 | tee evidence/m420_v5_tests.txt
+          python3 point1/m420/apply_m420_guard_v2.py oem | tee evidence/m420_v2_apply.txt
+          python3 point1/m420/apply_m420_v4.py oem | tee evidence/m420_v4_apply.txt
+          python3 point1/m420/apply_m420_v5.py oem | tee evidence/m420_v5_apply.txt
+          git -C oem diff --check
+          git -C oem diff -- Marlin/src/feature/bedlevel/bedlevel.cpp Marlin/src/gcode/bedlevel/M420.cpp > evidence/m420_patch.diff
+          test -s evidence/m420_patch.diff
+          sha256sum oem/Marlin/src/feature/bedlevel/bedlevel.cpp oem/Marlin/src/gcode/bedlevel/M420.cpp | tee evidence/m420_patched_checksums.txt
+          grep -nF 'SV04 NEXT V5' oem/Marlin/src/gcode/bedlevel/M420.cpp | tee evidence/m420_v5_anchor.txt
+
+      - name: Install pinned PlatformIO
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04-pio
+          /tmp/sv04-pio/bin/python -m pip install 'platformio==6.1.18' > evidence/pio_install.log 2>&1
+          /tmp/sv04-pio/bin/python -m platformio --version | tee evidence/pio_version.txt
+
+      - name: Build STM32 firmware (no upload)
+        shell: bash
+        run: |
+          set +e
+          /tmp/sv04-pio/bin/python -m platformio run -d oem -e STM32F103RET6_creality > evidence/build.log 2>&1
+          rc=$?
+          echo "BUILD_EXIT=$rc" | tee evidence/result.txt
+          echo 'FLASH_ALLOWED=NO' | tee -a evidence/result.txt
+          echo 'HARDWARE_TESTED=NO' | tee -a evidence/result.txt
+          grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' evidence/build.log > evidence/errors.txt || true
+          tail -n 80 evidence/build.log
+          exit "$rc"
+
+      - name: Save diagnostics (never firmware binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_278_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
