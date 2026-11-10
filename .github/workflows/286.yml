@@ -1,0 +1,107 @@
+name: '286 - SV04 285 + G29 cancellation combined STM32 - NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: integrated_backend
+            flags: ''
+          - profile: integrated_failclosed
+            flags: '-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and verify development sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence point1
+          echo "dc0f9db412ea443731db072f22061f48523e058231d9dfe669c0d66b8caee0b4  SV04_NEXT_286.zip" | sha256sum -c - | tee evidence/source_verified.txt
+          unzip -t SV04_NEXT_286.zip > evidence/zip_integrity.txt
+          unzip -q SV04_NEXT_286.zip -d point1
+          python3 point1/test_integration_281.py 2>&1 | tee evidence/merge_smoke.txt
+      - name: Run original and M420 C++ host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd point1
+          python3 -m unittest -v test_268.py test_272.py test_274.py test_275.py test_276.py 2>&1 | tee ../evidence/p1_tests.txt
+          python3 m420/test_m420_v4.py 2>&1 | tee ../evidence/m420_v4_tests.txt
+          python3 m420/test_m420_v5.py 2>&1 | tee ../evidence/m420_v5_tests.txt
+          python3 m420/test_m420_v6.py 2>&1 | tee ../evidence/m420_v6_tests.txt
+          python3 m420/test_oem_v6_anchor_282.py 2>&1 | tee ../evidence/m420_oem_anchor_282.txt
+          python3 m420/test_m420_v7.py 2>&1 | tee ../evidence/m420_v7_tests.txt
+          python3 m420/test_m420_v8.py 2>&1 | tee ../evidence/m420_v8_tests.txt
+          python3 m420/test_m420_v9.py 2>&1 | tee ../evidence/m420_v9_tests.txt
+          python3 test_integration_285.py 2>&1 | tee ../evidence/m420_v9_integration.txt
+      - name: Host tests for Claude's Auto60 production backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04host
+          /tmp/sv04host/bin/pip install pyyaml > evidence/pip_host.log 2>&1
+          cd point1/claude
+          /tmp/sv04host/bin/python -m unittest -v 04_TESTS.test_core_a60 04_TESTS.test_pipeline_a60 04_TESTS.test_patch_and_build_a60 2>&1 | tee ../../evidence/claude_host_tests.txt
+          /tmp/sv04host/bin/python -m unittest discover -s 04_TESTS/sim -p 'test_*.py' -v 2>&1 | tee ../../evidence/claude_sim_tests.txt
+      - name: Run new G29 active-cancel tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/g29/test_g29_cancel.py 2>&1 | tee evidence/g29_cancel_tests.txt
+      - name: Clone verified Sovol OEM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_commit.txt
+      - name: Integrate Claude 277, M420 V2 V4 V5 V6 V7 V8 V9 into same OEM tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/integrate_286.py oem --logs evidence/integration 2>&1 | tee evidence/integration_result.txt
+          git -C oem diff --check 2>&1 | tee evidence/git_diff_check.txt
+          git -C oem diff --stat | tee evidence/merged_diff_stat.txt
+          git -C oem diff > evidence/merged_diff.patch
+          test -s evidence/merged_diff.patch
+          grep -nF 'SV04 NEXT V9:' oem/Marlin/src/gcode/bedlevel/M420.cpp | tee evidence/m420_v9_present.txt
+          grep -nF 'SV04Claude_G29CancelRequested()' oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/g29_cancel_present.txt
+          grep -R -l 'SV04Claude_HomeBackendRequest' oem/Marlin/src/lcd/e3v2/creality | tee evidence/backend_present.txt
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04pio
+          /tmp/sv04pio/bin/pip install 'platformio==6.1.18' > evidence/pio_install.txt 2>&1
+          /tmp/sv04pio/bin/pio --version | tee evidence/pio_version.txt
+      - name: Full STM32 compile and link (no flash)
+        shell: bash
+        env:
+          PLATFORMIO_BUILD_FLAGS: ${{ matrix.flags }}
+        run: |
+          set +e
+          /tmp/sv04pio/bin/pio run -d oem -e STM32F103RET6_creality > evidence/build.log 2>&1
+          rc=$?
+          echo "PROFILE=${{ matrix.profile }}" | tee evidence/result.txt
+          echo "BUILD_EXIT=$rc" | tee -a evidence/result.txt
+          echo "FLASH_ALLOWED=NO" | tee -a evidence/result.txt
+          echo "HARDWARE_TESTED=NO" | tee -a evidence/result.txt
+          grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' evidence/build.log > evidence/errors.txt || true
+          grep -nE 'warning:' evidence/build.log > evidence/warnings.txt || true
+          grep -nE 'RAM:|Flash:' evidence/build.log > evidence/ram_flash.txt || true
+          tail -n 70 evidence/build.log
+          exit "$rc"
+      - name: Save all build and integration logs (never binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_286_${{ matrix.profile }}_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
