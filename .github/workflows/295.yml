@@ -1,0 +1,133 @@
+name: '295 - SV04 294 sequential builds NO MATRIX NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify input archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence point1 planner289 planner290
+          echo '2126fa983800e38106c57a5a542d33b81980b284bd2a3e6f2a197e49cec9a599  SV04_NEXT_287.zip' | sha256sum -c - | tee evidence/input_287_sha.txt
+          echo 'f59f4a248f251a31dc4d60d2a934e92409ca4101cfa51cc4484a3177a9236c2a  SV04_NEXT_289.zip' | sha256sum -c - | tee evidence/input_289_sha.txt
+          unzip -t SV04_NEXT_287.zip > evidence/zip_287_integrity.txt
+          echo '9301cd63e58dbf52c743547d66ffe1b691778a4c4e24ac01e9fcab0f08e410c6  SV04_NEXT_291.zip' | sha256sum -c - | tee evidence/input_290_sha.txt
+          unzip -t SV04_NEXT_289.zip > evidence/zip_289_integrity.txt
+          unzip -t SV04_NEXT_291.zip > evidence/zip_290_integrity.txt
+          unzip -q SV04_NEXT_287.zip -d point1
+          unzip -q SV04_NEXT_289.zip -d planner289
+          unzip -q SV04_NEXT_291.zip -d planner290
+          echo '07ef2e5a728ccfed3e399828a1b613b19f2da219ef2e71c54541fe954c997b3e  SV04_NEXT_294.zip' | sha256sum -c - | tee evidence/input_294_sha.txt
+          unzip -t SV04_NEXT_294.zip > evidence/zip_294_integrity.txt
+          mkdir -p eeprom294
+          unzip -q SV04_NEXT_294.zip -d eeprom294
+          echo 'da56a7646608b3a1ae461d6a5142fd446f8e07a59aabdeb04e4bcc2c93658afc  SV04_NEXT_295.zip' | sha256sum -c - | tee evidence/input_295_sha.txt
+          unzip -t SV04_NEXT_295.zip > evidence/zip_295_integrity.txt
+      - name: Run planner C++ and patch tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 planner289/test_planner_guard_288.py 2>&1 | tee evidence/planner_guard_tests.txt
+          grep -q 'ALL LOCAL TESTS PASSED' evidence/planner_guard_tests.txt
+          python3 planner290/test_planner_finite_guard_290.py 2>&1 | tee evidence/planner_finite_tests.txt
+          grep -q 'ALL LOCAL 290 TESTS PASSED' evidence/planner_finite_tests.txt
+      - name: Run EEPROM 292 293 294 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 eeprom294/test_commit_293.py 2>&1 | tee evidence/eeprom_293_commit_tests.txt
+          python3 eeprom294/test_patch_293.py 2>&1 | tee evidence/eeprom_293_patch_tests.txt
+          python3 eeprom294/test_eeprom_coordinator_294.py 2>&1 | tee evidence/eeprom_294_cpp_coordinator.txt
+          python3 eeprom294/test_patch_294.py 2>&1 | tee evidence/eeprom_294_patch_tests.txt
+      - name: Run 287 integration and G29 smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/test_integration_281.py 2>&1 | tee evidence/integration_smoke.txt
+          python3 point1/test_integration_285.py 2>&1 | tee evidence/integration_285.txt
+          python3 point1/g29/test_g29_cancel.py 2>&1 | tee evidence/g29_cancel.txt
+      - name: Clone pinned Sovol OEM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_commit.txt
+      - name: Integrate 287 then apply planner guard 288
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/integrate_286.py oem --logs evidence/integration 2>&1 | tee evidence/integration_result.txt
+          python3 planner289/apply_planner_guard_288.py oem 2>&1 | tee evidence/planner_patch_result.txt
+          python3 planner290/apply_planner_finite_guard_290.py oem 2>&1 | tee evidence/planner_finite_patch_result.txt
+          grep -F 'SV04 NEXT 288: refuse further queued motion' oem/Marlin/src/module/planner.cpp | tee evidence/planner_guard_present.txt
+          grep -F 'SV04 NEXT 290: Final validation before float-to-step conversion.' oem/Marlin/src/module/planner.cpp | tee evidence/planner_finite_guard_present.txt
+          python3 eeprom294/apply_eeprom_policy_292.py oem 2>&1 | tee evidence/eeprom_292_apply.txt
+          python3 eeprom294/apply_eeprom_commit_guard_293.py oem 2>&1 | tee evidence/eeprom_293_apply.txt
+          python3 eeprom294/apply_eeprom_coordinator_294.py oem 2>&1 | tee evidence/eeprom_294_apply.txt
+          grep -F 'SV04 NEXT 292: testable conservative policy' oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc | tee evidence/eeprom_292_present.txt
+          grep -F 'SV04 NEXT 293: journal closure must be confirmed' oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc | tee evidence/eeprom_293_present.txt
+          grep -F 'SV04 NEXT 294: successful readback alone' oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h | tee evidence/eeprom_294_present.txt
+          grep -F 'SV04 NEXT V9:' oem/Marlin/src/gcode/bedlevel/M420.cpp | tee evidence/m420_v9_present.txt
+          git -C oem diff --check 2>&1 | tee evidence/diff_check.txt
+          git -C oem diff --stat | tee evidence/diff_stat.txt
+          git -C oem diff > evidence/combined_294.patch
+          test -s evidence/combined_294.patch
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04pio
+          /tmp/sv04pio/bin/pip install 'platformio==6.1.18' > evidence/pio_install.txt 2>&1
+          /tmp/sv04pio/bin/pio --version | tee evidence/pio_version.txt
+      - name: Full STM32 compilation, both profiles in sequence - NO FLASH
+        shell: bash
+        run: |
+          set +e
+          mkdir -p evidence/integrated_backend evidence/integrated_failclosed
+          failed=0
+          for profile in integrated_backend integrated_failclosed; do
+            echo "=== Building $profile ==="
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            # Ensure two independent profiles are genuinely compiled.
+            /tmp/sv04pio/bin/pio run -d oem -e STM32F103RET6_creality -t clean > "evidence/$profile/clean.log" 2>&1
+            clean_rc=$?
+            if [ "$clean_rc" -eq 0 ]; then
+              /tmp/sv04pio/bin/pio run -d oem -e STM32F103RET6_creality > "evidence/$profile/build.log" 2>&1
+              rc=$?
+            else
+              rc=$clean_rc
+              echo "Build not started because clean failed" > "evidence/$profile/build.log"
+            fi
+            {
+              echo "PROFILE=$profile"
+              echo "CLEAN_EXIT=$clean_rc"
+              echo "BUILD_EXIT=$rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/$profile/build.log" > "evidence/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/$profile/build.log" > "evidence/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/$profile/build.log" > "evidence/$profile/ram_flash.txt" || true
+            tail -n 50 "evidence/$profile/build.log"
+            if [ "$rc" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Save both profiles and all prebuild logs, even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_295_BOTH_PROFILES_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
