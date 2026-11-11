@@ -1,0 +1,94 @@
+name: '289 - SV04 287 + planner guard 288 - STM32 NO FLASH'
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: integrated_backend
+            flags: ''
+          - profile: integrated_failclosed
+            flags: '-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify input archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence point1 planner289
+          echo '2126fa983800e38106c57a5a542d33b81980b284bd2a3e6f2a197e49cec9a599  SV04_NEXT_287.zip' | sha256sum -c - | tee evidence/input_287_sha.txt
+          echo 'f59f4a248f251a31dc4d60d2a934e92409ca4101cfa51cc4484a3177a9236c2a  SV04_NEXT_289.zip' | sha256sum -c - | tee evidence/input_289_sha.txt
+          unzip -t SV04_NEXT_287.zip > evidence/zip_287_integrity.txt
+          unzip -t SV04_NEXT_289.zip > evidence/zip_289_integrity.txt
+          unzip -q SV04_NEXT_287.zip -d point1
+          unzip -q SV04_NEXT_289.zip -d planner289
+      - name: Run planner C++ and patch tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 planner289/test_planner_guard_288.py 2>&1 | tee evidence/planner_guard_tests.txt
+          grep -q 'ALL LOCAL TESTS PASSED' evidence/planner_guard_tests.txt
+      - name: Run 287 integration and G29 smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/test_integration_281.py 2>&1 | tee evidence/integration_smoke.txt
+          python3 point1/test_integration_285.py 2>&1 | tee evidence/integration_285.txt
+          python3 point1/g29/test_g29_cancel.py 2>&1 | tee evidence/g29_cancel.txt
+      - name: Clone pinned Sovol OEM
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_commit.txt
+      - name: Integrate 287 then apply planner guard 288
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/integrate_286.py oem --logs evidence/integration 2>&1 | tee evidence/integration_result.txt
+          python3 planner289/apply_planner_guard_288.py oem 2>&1 | tee evidence/planner_patch_result.txt
+          grep -F 'SV04 NEXT 288: refuse further queued motion' oem/Marlin/src/module/planner.cpp | tee evidence/planner_guard_present.txt
+          grep -F 'SV04 NEXT V9:' oem/Marlin/src/gcode/bedlevel/M420.cpp | tee evidence/m420_v9_present.txt
+          git -C oem diff --check 2>&1 | tee evidence/diff_check.txt
+          git -C oem diff --stat | tee evidence/diff_stat.txt
+          git -C oem diff > evidence/combined_289.patch
+          test -s evidence/combined_289.patch
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04pio
+          /tmp/sv04pio/bin/pip install 'platformio==6.1.18' > evidence/pio_install.txt 2>&1
+          /tmp/sv04pio/bin/pio --version | tee evidence/pio_version.txt
+      - name: Full STM32 compile and link - no flash
+        shell: bash
+        env:
+          PLATFORMIO_BUILD_FLAGS: ${{ matrix.flags }}
+        run: |
+          set +e
+          /tmp/sv04pio/bin/pio run -d oem -e STM32F103RET6_creality > evidence/build.log 2>&1
+          rc=$?
+          echo "PROFILE=${{ matrix.profile }}" | tee evidence/result.txt
+          echo "BUILD_EXIT=$rc" | tee -a evidence/result.txt
+          echo 'FLASH_ALLOWED=NO' | tee -a evidence/result.txt
+          echo 'HARDWARE_TESTED=NO' | tee -a evidence/result.txt
+          grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' evidence/build.log > evidence/errors.txt || true
+          grep -nE 'warning:' evidence/build.log > evidence/warnings.txt || true
+          grep -nE 'RAM:|Flash:' evidence/build.log > evidence/ram_flash.txt || true
+          tail -n 80 evidence/build.log
+          exit "$rc"
+      - name: Save logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_289_${{ matrix.profile }}_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
