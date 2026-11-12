@@ -1,0 +1,161 @@
+name: "307 - SV04 G29 C2 plus EEPROM conservative recovery STM32 NO FLASH"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stm32_307:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+
+      - name: Verify packages and unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence point1 planner289 planner290 ref294 work307
+          echo '2126fa983800e38106c57a5a542d33b81980b284bd2a3e6f2a197e49cec9a599  SV04_NEXT_287.zip' | sha256sum -c -
+          echo 'f59f4a248f251a31dc4d60d2a934e92409ca4101cfa51cc4484a3177a9236c2a  SV04_NEXT_289.zip' | sha256sum -c -
+          echo '9301cd63e58dbf52c743547d66ffe1b691778a4c4e24ac01e9fcab0f08e410c6  SV04_NEXT_291.zip' | sha256sum -c -
+          echo '07ef2e5a728ccfed3e399828a1b613b19f2da219ef2e71c54541fe954c997b3e  SV04_NEXT_294.zip' | sha256sum -c -
+          echo 'da56a7646608b3a1ae461d6a5142fd446f8e07a59aabdeb04e4bcc2c93658afc  SV04_NEXT_295.zip' | sha256sum -c -
+          echo 'beec4b26dbf68509dff0518e7642706a63c2383bbe990a6ee43c24886a269f10  A 307.zip' | sha256sum -c - | tee evidence/input_307_sha.txt
+          for file in SV04_NEXT_287.zip SV04_NEXT_289.zip SV04_NEXT_291.zip SV04_NEXT_294.zip SV04_NEXT_295.zip 'A 307.zip'; do
+            unzip -t "$file" >/dev/null
+            echo "ZIP_OK=$file"
+          done | tee evidence/input_zip_integrity.txt
+          unzip -q SV04_NEXT_287.zip -d point1
+          unzip -q SV04_NEXT_289.zip -d planner289
+          unzip -q SV04_NEXT_291.zip -d planner290
+          unzip -q SV04_NEXT_294.zip -d ref294
+          unzip -q 'A 307.zip' -d work307
+          (cd work307 && sha256sum -c SHA256SUMS_307.txt) > evidence/integrated_payload_sha.txt
+
+      - name: Local integration and EEPROM power-cut tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 work307/tests/test_composition_307.py 2>&1 | tee evidence/composition_307.txt
+          grep -F 'SUMMARY tests=5 pass=5 fail=0' evidence/composition_307.txt
+          g++ -std=c++11 -O2 -Wall -Wextra -pedantic work307/tests/test_eeprom_core_306.cpp -o /tmp/sv04_core306
+          /tmp/sv04_core306 2>&1 | tee evidence/eeprom_core_306.txt
+          python3 - <<'PY_VERIFY_CPP'
+          import pathlib,re
+          s=pathlib.Path('evidence/eeprom_core_306.txt').read_text()
+          m=re.search(r'SUMMARY tests=(\d+) pass=(\d+) fail=(\d+)',s)
+          assert m and int(m[1]) >= 50 and int(m[1]) == int(m[2]) and int(m[3]) == 0, '306 C++ core regression failed'
+          print('EEPROM_CPP306_STRICT_PASS',m.group(0))
+          PY_VERIFY_CPP
+
+      - name: Retest Claude C2 OEM T.cpp toolchange protection
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p c2_full
+          unzip -q work307/references/CLAUDE_C2_SOURCES_TESTS.zip -d c2_full
+          (cd c2_full && python3 -m unittest discover -s claude/04_TESTS/sim -p 'test_toolchange_c2.py' -v) 2>&1 | tee evidence/c2_toolchange_tests.txt
+          grep -F 'Ran 6 tests' evidence/c2_toolchange_tests.txt
+          grep -F 'OK' evidence/c2_toolchange_tests.txt
+
+      - name: Recheck planner and coordinator with strict summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 planner289/test_planner_guard_288.py 2>&1 | tee evidence/planner_288.txt
+          grep -q 'ALL LOCAL TESTS PASSED' evidence/planner_288.txt
+          python3 planner290/test_planner_finite_guard_290.py 2>&1 | tee evidence/planner_290.txt
+          grep -q 'ALL LOCAL 290 TESTS PASSED' evidence/planner_290.txt
+          python3 ref294/test_eeprom_coordinator_294.py 2>&1 | tee evidence/coordinator_294.txt
+          python3 - <<'PY_VERIFY_COORD'
+          import pathlib,re
+          s=pathlib.Path('evidence/coordinator_294.txt').read_text()
+          m=re.search(r'SUMMARY tests=(\d+) pass=(\d+) fail=(\d+)',s)
+          assert m and int(m[1]) >= 150 and int(m[1]) == int(m[2]) and int(m[3]) == 0, '294 coordinator reported failed tests, despite wrapper exit 0'
+          print('COORDINATOR_STRICT_PASS',m.group(0))
+          PY_VERIFY_COORD
+          python3 point1/test_integration_281.py 2>&1 | tee evidence/integration_281.txt
+          python3 point1/test_integration_285.py 2>&1 | tee evidence/integration_285.txt
+          python3 point1/g29/test_g29_cancel.py 2>&1 | tee evidence/g29_cancel.txt
+
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+
+      - name: Integrate 287 plus planner and 307-safe header provisioning with all 306 patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 point1/integrate_286.py oem --logs evidence/integration 2>&1 | tee evidence/integration_base.txt
+          python3 planner289/apply_planner_guard_288.py oem 2>&1 | tee evidence/planner_288_applied.txt
+          python3 planner290/apply_planner_finite_guard_290.py oem 2>&1 | tee evidence/planner_290_applied.txt
+          python3 work307/integrate_307.py oem 2>&1 | tee evidence/actual_oem_composition_307.txt
+          grep -F 'SV04_NEXT_307_COMPOSITION=PASS' evidence/actual_oem_composition_307.txt
+          # Include formerly absent, now genuinely new standalone headers in source diff evidence.
+          git -C oem add -N .
+          git -C oem status --short | tee evidence/oem_status.txt
+          git -C oem diff --check 2>&1 | tee evidence/oem_diff_check.txt
+          git -C oem diff --stat | tee evidence/oem_diff_stat.txt
+          git -C oem diff > evidence/combined_307.patch
+          test -s evidence/combined_307.patch
+
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_307
+          /tmp/sv04_pio_307/bin/pip install 'platformio==6.1.18' > evidence/pio_install_307.txt 2>&1
+          /tmp/sv04_pio_307/bin/pio --version | tee evidence/pio_version.txt
+
+      - name: Build STM32 both profiles independently (NO FLASH)
+        shell: bash
+        run: |
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/$profile"
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_307/bin/pio run -d oem -e STM32F103RET6_creality -t clean > "evidence/$profile/clean.log" 2>&1
+            clean_rc=$?
+            if [ "$clean_rc" -eq 0 ]; then
+              /tmp/sv04_pio_307/bin/pio run -d oem -e STM32F103RET6_creality > "evidence/$profile/build.log" 2>&1
+              build_rc=$?
+            else
+              build_rc=$clean_rc
+              echo 'Build not started because clean failed' > "evidence/$profile/build.log"
+            fi
+            {
+              echo "PROFILE=$profile"
+              echo "CLEAN_EXIT=$clean_rc"
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/$profile/build.log" > "evidence/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/$profile/build.log" > "evidence/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/$profile/build.log" > "evidence/$profile/ram_flash.txt" || true
+            tail -n 45 "evidence/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_307_BOTH_PROFILES_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
