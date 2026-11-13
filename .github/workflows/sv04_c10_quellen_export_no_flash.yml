@@ -1,0 +1,74 @@
+name: "SV04 C10 - OEM Quellen plus 318 motion exportieren (NO FLASH)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export_sources:
+    name: "Pin OEM, verify 318, export seven real sources"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Validate 318 source and pull pinned Sovol OEM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  SV04_NEXT_318_GITHUB_UPLOAD_06.zip' | sha256sum -c -
+          unzip -t SV04_NEXT_318_GITHUB_UPLOAD_06.zip >/dev/null
+          git clone --quiet https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git OEM_SOURCE
+          git -C OEM_SOURCE checkout --quiet --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C OEM_SOURCE rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+      - name: Export source and hash audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p SV04_C10_QUELLEN/01_OEM_ORIGINAL/Marlin/src/gcode
+          mkdir -p SV04_C10_QUELLEN/01_OEM_ORIGINAL/Marlin/src/module
+          mkdir -p SV04_C10_QUELLEN/01_OEM_ORIGINAL/Marlin/src/feature
+          mkdir -p SV04_C10_QUELLEN/01_OEM_ORIGINAL/Marlin/src/lcd/e3v2/creality
+          mkdir -p SV04_C10_QUELLEN/02_STAND_318/Marlin/src/module
+          for p in \
+            Marlin/src/gcode/queue.cpp \
+            Marlin/src/MarlinCore.cpp \
+            Marlin/src/module/probe.cpp \
+            Marlin/src/feature/bltouch.cpp \
+            Marlin/src/module/endstops.cpp \
+            Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp; do
+            test -s "OEM_SOURCE/$p"
+            mkdir -p "SV04_C10_QUELLEN/01_OEM_ORIGINAL/$(dirname "$p")"
+            cp "OEM_SOURCE/$p" "SV04_C10_QUELLEN/01_OEM_ORIGINAL/$p"
+          done
+          unzip -p SV04_NEXT_318_GITHUB_UPLOAD_06.zip assets/patched_309/motion.cpp > SV04_C10_QUELLEN/02_STAND_318/Marlin/src/module/motion.cpp
+          test -s SV04_C10_QUELLEN/02_STAND_318/Marlin/src/module/motion.cpp
+          python3 - <<'PY'
+          import json, zipfile, hashlib, pathlib, sys
+          root=pathlib.Path('SV04_C10_QUELLEN')
+          with zipfile.ZipFile('SV04_NEXT_318_GITHUB_UPLOAD_06.zip') as z:
+              expected=json.loads(z.read('assets/expected_318_hashes.json'))
+          print('EXPECTED_318_KEYS',sorted(expected))
+          p=root/'02_STAND_318/Marlin/src/module/motion.cpp'
+          actual=hashlib.sha256(p.read_bytes()).hexdigest()
+          if actual != expected['motion.cpp']:
+              raise SystemExit(f'FAIL: 318 motion hash: expected {expected["motion.cpp"]}, actual {actual}')
+          sha_lines=[]
+          for f in sorted(root.rglob('*.cpp')):
+              sha_lines.append(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.relative_to(root)}')
+          (root/'SHA256_SOURCES.txt').write_text('\n'.join(sha_lines)+'\n')
+          (root/'README.txt').write_text('SV04-NEXT C10: six OEM source files from Sovol commit 1867fcba75354a5c65e0631d6972dd19f1bd6cbe, and motion.cpp from verified 318 overlay. Original 309/318 unchanged. No build, no hardware check, FLASH_ALLOWED=NO.\n')
+          print('\n'.join(sha_lines))
+          PY
+          (cd SV04_C10_QUELLEN && sha256sum -c SHA256_SOURCES.txt)
+          zip -q -r SV04_NEXT_C10_OEM_QUELLEN_UND_318_MOTION_NO_FLASH.zip SV04_C10_QUELLEN
+          unzip -t SV04_NEXT_C10_OEM_QUELLEN_UND_318_MOTION_NO_FLASH.zip | tail -1
+      - name: Upload full source ZIP
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_C10_OEM_QUELLEN_UND_318_MOTION_NO_FLASH
+          path: SV04_NEXT_C10_OEM_QUELLEN_UND_318_MOTION_NO_FLASH.zip
+          if-no-files-found: error
