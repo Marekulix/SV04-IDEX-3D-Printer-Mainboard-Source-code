@@ -1,0 +1,69 @@
+name: "SV04 C10 - 318 Stopp-Pruefungen und echte Gcode/DWIN-Quellen exportieren (NO FLASH)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export_318_stopp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Pinned 318 and C9 inputs verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  SV04_NEXT_318_GITHUB_UPLOAD_06.zip' | sha256sum -c -
+          echo 'd7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip' | sha256sum -c -
+          unzip -t SV04_NEXT_318_GITHUB_UPLOAD_06.zip >/dev/null
+          unzip -t SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip >/dev/null
+          mkdir -p c318 c9pkg
+          unzip -q SV04_NEXT_318_GITHUB_UPLOAD_06.zip -d c318
+          unzip -q SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip -d c9pkg
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c -
+      - name: Reproduce pinned OEM and route-B 309
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+      - name: Strictly integrate unmodified 318 into new tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 | tee integration_318.txt
+          grep -F 'STRICT_PRECHECK=OK' integration_318.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' integration_318.txt
+          sha256sum -c - <<'HASHES'
+          12958700de094c44386c381a423966663058f62dfa7e1204d5922bcb46944a8d  oem318/Marlin/src/gcode/gcode.cpp
+          0d8ef04dac43935d917d77a7c0efd269361b924b26270ccee85fadba9171a94c  oem318/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          HASHES
+      - name: Export all actual 318 stop checks, both relevant sources, and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p C10_318_STOPP_EVIDENZ/Marlin/src/gcode C10_318_STOPP_EVIDENZ/Marlin/src/lcd/e3v2/creality
+          cd oem318
+          grep -rnE 'IsRunning|IsStopped' Marlin/src > ../C10_318_STOPP_EVIDENZ/stopp_pruefungen_318.txt || true
+          cd ..
+          test -s C10_318_STOPP_EVIDENZ/stopp_pruefungen_318.txt
+          cp oem318/Marlin/src/gcode/gcode.cpp C10_318_STOPP_EVIDENZ/Marlin/src/gcode/
+          cp oem318/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp C10_318_STOPP_EVIDENZ/Marlin/src/lcd/e3v2/creality/
+          echo '318 reconstructed from pinned OEM commit via combined_308.patch and strict 318 installer. No build in this export job. FLASH_ALLOWED=NO. HARDWARE_TESTED=NO.' > C10_318_STOPP_EVIDENZ/README.txt
+          (cd C10_318_STOPP_EVIDENZ && find . -type f ! -name SHA256.txt -print0 | sort -z | xargs -0 sha256sum > SHA256.txt && sha256sum -c SHA256.txt)
+          zip -q -r SV04_NEXT_C10_318_STOPP_BELEGE_NO_FLASH.zip C10_318_STOPP_EVIDENZ
+          unzip -t SV04_NEXT_C10_318_STOPP_BELEGE_NO_FLASH.zip | tail -1
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_C10_318_STOPP_BELEGE_NO_FLASH
+          path: SV04_NEXT_C10_318_STOPP_BELEGE_NO_FLASH.zip
+          if-no-files-found: error
