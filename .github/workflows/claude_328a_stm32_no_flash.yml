@@ -1,0 +1,789 @@
+name: "SV04 328A EEPROM SETTINGS FIELDS (B1 load check, B2 order, B3 report) on 325 - SV04 325 M420 FAILCLOSED - DWIN322 5-PUNKTE AUDIT - DWIN321 integration - C13 + DWIN319 INTEGRATION27 - FIX26 WORKFLOW25 - IDEX gap guard, no motion before homing, fans on at kill on C12 on C11 on C10 on C9 on 318 (route B, STRICT installer), baseline C12 vs C13 copy, STM32 NO FLASH, binaries exported, evaluated (number-free)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline_c12:
+    name: "Baseline build: NEW C12 copy (318 + C9 + C10 + C11 + C12), both profiles"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (resolved by prefix and SHA-256 - 318 hand-over, Claude C9, C10, C11, C12)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          mkdir -p evidence c318 c9pkg c10pkg c11pkg c12pkg
+          F318="$(resolve SV04_NEXT_318_GITHUB_UPLOAD_06 b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd)"
+          echo "F318=$F318" | tee -a evidence/input_names.txt
+          echo "b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  $F318" | sha256sum -c - | tee evidence/input_318_sha.txt
+          unzip -t "$F318" > evidence/zip_318_integrity.txt
+          unzip -q "$F318" -d c318
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "F9=$F9" | tee -a evidence/input_names.txt
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t "$F9" > evidence/zip_c9_integrity.txt
+          unzip -q "$F9" -d c9pkg
+          F10="$(resolve SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e)"
+          echo "F10=$F10" | tee -a evidence/input_names.txt
+          echo "b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  $F10" | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "$F10" > evidence/zip_c10_integrity.txt
+          unzip -q "$F10" -d c10pkg
+          F11="$(resolve SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e)"
+          echo "F11=$F11" | tee -a evidence/input_names.txt
+          echo "bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e  $F11" | sha256sum -c - | tee evidence/input_c11_sha.txt
+          unzip -t "$F11" > evidence/zip_c11_integrity.txt
+          unzip -q "$F11" -d c11pkg
+          F12="$(resolve SV04_NEXT_CLAUDE_C12_HOMEAXIS_FAN_STOP ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5)"
+          echo "F12=$F12" | tee -a evidence/input_names.txt
+          echo "ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5  $F12" | sha256sum -c - | tee evidence/input_c12_sha.txt
+          unzip -t "$F12" > evidence/zip_c12_integrity.txt
+          unzip -q "$F12" -d c12pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Apply C11 patch to a NEW copy of C10 (C9/C10 trees stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c10 oem_c11
+          python3 c11pkg/02_PATCHES/apply_c11.py oem_c11 2>&1 | tee evidence/apply_c11.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "MarlinCore.cpp: PATCHED" evidence/apply_c11.txt
+          diff -rq oem_c10 oem_c11 2>&1 | tee evidence/diff_c10_vs_c11.txt || true
+          test "$(diff -rq oem_c10 oem_c11 | wc -l)" -eq 3
+          grep -F "gcode/queue.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "control/M999.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c10_vs_c11.txt
+          sha256sum oem_c11/Marlin/src/gcode/queue.cpp oem_c11/Marlin/src/gcode/control/M999.cpp oem_c11/Marlin/src/MarlinCore.cpp | tee evidence/source_hashes_c11.txt
+      - name: Run Claude C11 host tests and C10 regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c11pkg/03_TESTS && python3 -B test_c11.py) 2>&1 | tee evidence/c11_host_tests.txt
+          grep -qx 'OK' evidence/c11_host_tests.txt
+          (cd c11pkg/03_TESTS && python3 -B test_c11_homeaxis_anker.py) 2>&1 | tee evidence/c11_homeaxis_anker.txt
+          grep -qx 'OK' evidence/c11_homeaxis_anker.txt
+          (cd c11pkg/03_TESTS/regression_c10/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_regression_in_c11.txt
+          grep -qx 'OK' evidence/c10_regression_in_c11.txt
+      - name: Apply C12 patch to a NEW copy of C11 (C11 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c11 oem_c12
+          python3 c12pkg/02_PATCHES/apply_c12.py oem_c12 2>&1 | tee evidence/apply_c12.txt
+          grep -F "sv04_claude_stopgate.h: PATCHED" evidence/apply_c12.txt
+          diff -rq oem_c11 oem_c12 2>&1 | tee evidence/diff_c11_vs_c12.txt || true
+          test "$(diff -rq oem_c11 oem_c12 | wc -l)" -eq 1
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c11_vs_c12.txt
+          sha256sum oem_c12/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hash_c12_stopgate.txt
+          grep -F "7ead4e640f70f1c9796d5cb3085f7f758a40ab63ce127fc1c4623d09cef9f29c" evidence/source_hash_c12_stopgate.txt
+      - name: Run Claude C12 host tests (fan gate, real homeaxis harness; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c12pkg/03_TESTS && python3 -B test_c12_fan.py) 2>&1 | tee evidence/c12_fan_tests.txt
+          grep -qx 'OK' evidence/c12_fan_tests.txt
+          (cd c12pkg/03_TESTS && python3 -B test_c12_homeaxis.py) 2>&1 | tee evidence/c12_homeaxis_tests.txt
+          grep -qx 'OK' evidence/c12_homeaxis_tests.txt
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c12_base/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c12/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c12 -e STM32F103RET6_creality > "evidence/c12_base/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c12_base/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c12_base/$profile/build.log"
+              build_rc=42
+            fi
+            {
+              echo "BUILD_TREE=oem_c12"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C12_ON_C11_ON_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c12_base/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c12_base/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C13_BASELINE_C12_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  c13_changes:
+    name: "Integrated build: NEW copy (C12 + C13 + DWIN319+320+321+322), host tests, both profiles, firmware export"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (resolved by prefix and SHA-256 - 318 hand-over, Claude C9, C10, C11, C12, C13)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          mkdir -p evidence c318 c9pkg c10pkg c11pkg c12pkg c13pkg
+          F318="$(resolve SV04_NEXT_318_GITHUB_UPLOAD_06 b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd)"
+          echo "F318=$F318" | tee -a evidence/input_names.txt
+          echo "b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  $F318" | sha256sum -c - | tee evidence/input_318_sha.txt
+          unzip -t "$F318" > evidence/zip_318_integrity.txt
+          unzip -q "$F318" -d c318
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "F9=$F9" | tee -a evidence/input_names.txt
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t "$F9" > evidence/zip_c9_integrity.txt
+          unzip -q "$F9" -d c9pkg
+          F10="$(resolve SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e)"
+          echo "F10=$F10" | tee -a evidence/input_names.txt
+          echo "b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  $F10" | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "$F10" > evidence/zip_c10_integrity.txt
+          unzip -q "$F10" -d c10pkg
+          F11="$(resolve SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e)"
+          echo "F11=$F11" | tee -a evidence/input_names.txt
+          echo "bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e  $F11" | sha256sum -c - | tee evidence/input_c11_sha.txt
+          unzip -t "$F11" > evidence/zip_c11_integrity.txt
+          unzip -q "$F11" -d c11pkg
+          F12="$(resolve SV04_NEXT_CLAUDE_C12_HOMEAXIS_FAN_STOP ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5)"
+          echo "F12=$F12" | tee -a evidence/input_names.txt
+          echo "ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5  $F12" | sha256sum -c - | tee evidence/input_c12_sha.txt
+          unzip -t "$F12" > evidence/zip_c12_integrity.txt
+          unzip -q "$F12" -d c12pkg
+          F13="$(resolve SV04_NEXT_CLAUDE_C13_IDEX_G28_SAFETY 79c81a07b09a298faed58f16f6681116ec615ba3134230966231cb35282b758e)"
+          echo "F13=$F13" | tee -a evidence/input_names.txt
+          echo "79c81a07b09a298faed58f16f6681116ec615ba3134230966231cb35282b758e  $F13" | sha256sum -c - | tee evidence/input_c13_sha.txt
+          unzip -t "$F13" > evidence/zip_c13_integrity.txt
+          unzip -q "$F13" -d c13pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Apply C11 patch to a NEW copy of C10 (C9/C10 trees stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c10 oem_c11
+          python3 c11pkg/02_PATCHES/apply_c11.py oem_c11 2>&1 | tee evidence/apply_c11.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "MarlinCore.cpp: PATCHED" evidence/apply_c11.txt
+          diff -rq oem_c10 oem_c11 2>&1 | tee evidence/diff_c10_vs_c11.txt || true
+          test "$(diff -rq oem_c10 oem_c11 | wc -l)" -eq 3
+          grep -F "gcode/queue.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "control/M999.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c10_vs_c11.txt
+          sha256sum oem_c11/Marlin/src/gcode/queue.cpp oem_c11/Marlin/src/gcode/control/M999.cpp oem_c11/Marlin/src/MarlinCore.cpp | tee evidence/source_hashes_c11.txt
+      - name: Run Claude C11 host tests and C10 regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c11pkg/03_TESTS && python3 -B test_c11.py) 2>&1 | tee evidence/c11_host_tests.txt
+          grep -qx 'OK' evidence/c11_host_tests.txt
+          (cd c11pkg/03_TESTS && python3 -B test_c11_homeaxis_anker.py) 2>&1 | tee evidence/c11_homeaxis_anker.txt
+          grep -qx 'OK' evidence/c11_homeaxis_anker.txt
+          (cd c11pkg/03_TESTS/regression_c10/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_regression_in_c11.txt
+          grep -qx 'OK' evidence/c10_regression_in_c11.txt
+      - name: Apply C12 patch to a NEW copy of C11 (C11 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c11 oem_c12
+          python3 c12pkg/02_PATCHES/apply_c12.py oem_c12 2>&1 | tee evidence/apply_c12.txt
+          grep -F "sv04_claude_stopgate.h: PATCHED" evidence/apply_c12.txt
+          diff -rq oem_c11 oem_c12 2>&1 | tee evidence/diff_c11_vs_c12.txt || true
+          test "$(diff -rq oem_c11 oem_c12 | wc -l)" -eq 1
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c11_vs_c12.txt
+          sha256sum oem_c12/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hash_c12_stopgate.txt
+          grep -F "7ead4e640f70f1c9796d5cb3085f7f758a40ab63ce127fc1c4623d09cef9f29c" evidence/source_hash_c12_stopgate.txt
+      - name: Run Claude C12 host tests (fan gate, real homeaxis harness; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c12pkg/03_TESTS && python3 -B test_c12_fan.py) 2>&1 | tee evidence/c12_fan_tests.txt
+          grep -qx 'OK' evidence/c12_fan_tests.txt
+          (cd c12pkg/03_TESTS && python3 -B test_c12_homeaxis.py) 2>&1 | tee evidence/c12_homeaxis_tests.txt
+          grep -qx 'OK' evidence/c12_homeaxis_tests.txt
+      - name: Apply C13 patch to a NEW copy of C12 (C12 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c12 oem_c13
+          python3 c13pkg/02_PATCHES/apply_c13.py oem_c13 2>&1 | tee evidence/apply_c13.txt
+          test "$(grep -c ': PATCHED' evidence/apply_c13.txt)" -eq 3
+          grep -F "sv04_claude_idex_guard.h: CREATED" evidence/apply_c13.txt
+          diff -rq oem_c12 oem_c13 2>&1 | tee evidence/diff_c12_vs_c13.txt || true
+          test "$(diff -rq oem_c12 oem_c13 | wc -l)" -eq 4
+          grep -F "Configuration.h" evidence/diff_c12_vs_c13.txt
+          grep -F "module/motion.cpp" evidence/diff_c12_vs_c13.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c12_vs_c13.txt
+          grep -F "sv04_claude_idex_guard.h" evidence/diff_c12_vs_c13.txt
+          sha256sum oem_c13/Marlin/Configuration.h oem_c13/Marlin/src/module/motion.cpp oem_c13/Marlin/src/MarlinCore.cpp oem_c13/Marlin/src/module/sv04_claude_idex_guard.h | tee evidence/source_hashes_c13.txt
+          grep -F "9480fcfc1e5abf1670b33e982762685d88cd351461bea0e45f169e610b0fe681" evidence/source_hashes_c13.txt
+          grep -E '^#define NO_MOTION_BEFORE_HOMING' oem_c13/Marlin/Configuration.h | tee evidence/no_motion_define.txt
+      - name: Run Claude C13 host tests (installer, idex guard, no-motion gate, kill fans, mutants; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c13pkg/03_TESTS && python3 -B test_c13.py) 2>&1 | tee evidence/c13_host_tests.txt
+          grep -qx 'OK' evidence/c13_host_tests.txt
+      - name: Integrate DWIN 319 into C13 copy (strict hash and validated patch, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYDWIN'
+          import pathlib, hashlib, base64
+          src=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='0d8ef04dac43935d917d77a7c0efd269361b924b26270ccee85fadba9171a94c'
+          actual=hashlib.sha256(src.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit('DWIN 318 source SHA256 mismatch: ' + actual)
+          encoded='LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC05Nyw2ICs5Nyw4IEBACiBib29sIHNkX3ByaW50aW5nX2F1dG9wYXVzZTsKIGlubGluZSB2b2lkIFJUU19saW5lX3RvX2N1cnJlbnQoQXhpc0VudW0gYXhpcykKIHsKKyAgLy8gRGVmZW5zZS1pbi1kZXB0aDogRFdJTiBtYW51YWwgbW92ZXMgYnlwYXNzIHRoZSBHLWNvZGUgc3RvcCBnYXRlLgorICBpZiAoSXNTdG9wcGVkKCkpIHJldHVybjsKICAgaWYgKCFwbGFubmVyLmlzX2Z1bGwoKSkKICAgewogICAgIHBsYW5uZXIuYnVmZmVyX2xpbmUoY3VycmVudF9wb3NpdGlvbiwgTU1NX1RPX01NUyhtYW51YWxfZmVlZHJhdGVfbW1fbVsoaW50OF90KWF4aXNdKSwgYWN0aXZlX2V4dHJ1ZGVyKTsKQEAgLTc0OSw2ICs3NTEsMjIgQEAKICAgICByZXR1cm47CiAgIH0KIAorICAvLyBEZWZlbnNlLWluLWRlcHRoIGZvciBkaXJlY3QgTENEIGNhbGxzLiBVbmxpa2UgcXVldWVkIEctY29kZSwgTENECisgIC8vIGhhbmRsZXJzIGNhbiBtb3ZlIHN0ZXBwZXJzLCByZXN1bWUgU0QsIGFuZCBzZXQgaGVhdGVycyBkaXJlY3RseS4KKyAgLy8gV2hpbGUgc3RvcHBlZCwgYWxsb3cgT05MWSBleHBsaWNpdCBwcmludGVyIHN0b3AgYW5kIGNvb2xpbmcgYWN0aW9ucy4KKyAgLy8gVGVtcFNjcmVlbktleSAweEYxIGlzIHRoZSBkb2N1bWVudGVkIGhlYXRlci1vZmYvY29vbGluZyBvcGVyYXRpb24uCisgIC8vIE5vIG90aGVyIGtleSBtYXkgcmVhY2ggaXRzIHVuZGVybHlpbmcgaGFuZGxlciB1bnRpbCBNOTk5IGFuZCByZS1ob21pbmcuCisgIGlmIChJc1N0b3BwZWQoKQorICAgICAgJiYgQ2hlY2trZXkgIT0gU3RvcFByaW50S2V5CisgICAgICAmJiBDaGVja2tleSAhPSBDb29sU2NyZWVuS2V5CisgICAgICAmJiAhKENoZWNra2V5ID09IFRlbXBTY3JlZW5LZXkgJiYgcmVjZGF0LmRhdGFbMF0gPT0gMHhGMSkpIHsKKyAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFNUT1AgLSBhY3Rpb24gZGVuaWVkOyBNOTk5IGFuZCBob21lIHJlcXVpcmVkIik7CisgICAgbWVtc2V0KCZyZWNkYXQsIDAsIHNpemVvZihyZWNkYXQpKTsKKyAgICByZWNkYXQuaGVhZFswXSA9IEZIT05FOworICAgIHJlY2RhdC5oZWFkWzFdID0gRkhUV087CisgICAgcmV0dXJuOworICB9CisKICAgc3dpdGNoKENoZWNra2V5KQogICB7CiAgICAgY2FzZSBNYWluUGFnZUtleToKQEAgLTI2MzcsNyArMjY1NSwxNCBAQAogICAgICAgcnRzY2hlY2suUlRTX1NuZERhdGEodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0uY2Vsc2l1cywgSEVBRDFfQ1VSUkVOVF9URU1QX1ZQKTsKICAgICAgIHJ0c2NoZWNrLlJUU19TbmREYXRhKHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLmNlbHNpdXMsIEJFRF9DVVJSRU5UX1RFTVBfVlApOwogCi0gICAgICBpZigobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMF0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMV0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVfYmVkICE9IHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLnRhcmdldCkpCisgICAgICAvLyBBIHN0b3BwZWQgcHJpbnRlciBtdXN0IG5ldmVyIHJlY2VpdmUgYSBzdGFsZSBwb3NpdGl2ZSB0YXJnZXQgZnJvbQorICAgICAgLy8gRFdJTidzIHBlcmlvZGljIHRhcmdldCByZS1zeW5jaHJvbml6YXRpb24gcGF0aC4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSkgeworICAgICAgICB0aGVybWFsTWFuYWdlci5zZXRUYXJnZXRIb3RlbmQoMCwgMCk7CisgICAgICAgIHRoZXJtYWxNYW5hZ2VyLnNldFRhcmdldEhvdGVuZCgwLCAxKTsKKyAgICAgICAgdGhlcm1hbE1hbmFnZXIuc2V0VGFyZ2V0QmVkKDApOworICAgICAgfQorICAgICAgZWxzZSBpZigobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMF0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMV0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVfYmVkICE9IHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLnRhcmdldCkpCiAgICAgICB7CiAgICAgICAgIHRoZXJtYWxNYW5hZ2VyLnNldFRhcmdldEhvdGVuZCh0aGVybWFsTWFuYWdlci50ZW1wX2hvdGVuZFswXS50YXJnZXQsIDApOwogICAgICAgICB0aGVybWFsTWFuYWdlci5zZXRUYXJnZXRIb3RlbmQodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0LCAxKTsK'
+          data=base64.b64decode(''.join(encoded.split()),validate=True)
+          patch=pathlib.Path('dwin319_27.patch')
+          patch.write_bytes(data)
+          assert hashlib.sha256(data).hexdigest() == 'af8eff98113d7537c1dbd601c70738bc17b186b4b3daea1e3777a0f7a4e0391a'
+          print('DWIN_INPUT_HASH=OK')
+          PYDWIN
+          git -C oem_c13 apply --check ../dwin319_27.patch
+          git -C oem_c13 apply ../dwin319_27.patch
+          echo '911c0ef756288e43ab48fa7e578148d3f599bf674907d54fff46b670b1bc73fd  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin319_hash.txt
+          git -C oem_c13 diff -- Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp > evidence/dwin319_c13_diff.patch
+          test -s evidence/dwin319_c13_diff.patch
+          echo 'DWIN319_INTEGRATED_ON_C13=YES' | tee evidence/dwin319_status.txt
+
+      - name: Apply DWIN320 manual move and G28 safeguards (only after verified DWIN319)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY320'
+          import base64,hashlib,pathlib
+          path=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='911c0ef756288e43ab48fa7e578148d3f599bf674907d54fff46b670b1bc73fd'
+          assert hashlib.sha256(path.read_bytes()).hexdigest()==expected,'unexpected DWIN319 source, refusing patch'
+          patch=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0xNTAxLDkgKzE1MDEsMTAgQEAKICAgICAgICAgfQogICAgICAgICBlbHNlCiAgICAgICAgIHsKLSAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBaMCIpKTsKLSAgICAgICAgfQotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcxIEYyMDAgWjAuMCIpKTsKKyAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBaIikpOworICAgICAgICB9CisgICAgICAgIC8vIERvIG5vdCBxdWV1ZSBhIFogbW92ZSBhaGVhZCBvZiB0aGUgaG9taW5nIHJlc3VsdDogZmFpbGVkIEcyOCBtdXN0CisgICAgICAgIC8vIG5ldmVyIGJlIGZvbGxvd2VkIGJ5IGFuIGF1dG9tYXRpY2FsbHkgcXVldWVkIG1vdGlvbiBjb21tYW5kLgogICAgICAgfQogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gMikKICAgICAgIHsKQEAgLTE2MzAsNiArMTYzMSwxMyBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFhheGlzbW92ZUtleToKKyAgICAgIC8vIERXSU4gd3JpdGVzIGN1cnJlbnRfcG9zaXRpb24gYmVmb3JlIGNhbGxpbmcgUlRTX2xpbmVfdG9fY3VycmVudC4KKyAgICAgIC8vIFJlamVjdCB1bnJlZmVyZW5jZWQgbW92ZXMgKmJlZm9yZSogbXV0YXRpbmcgcG9zaXRpb25hbCBzdGF0ZS4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogbWFudWFsIFhZWiBtb3ZlIGRlbmllZDsgaG9tZSBhbGwgYXhlcyBmaXJzdCIpOworICAgICAgICBicmVhazsKKyAgICAgIH0KICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICB3YWl0d2F5ID0gNDsKQEAgLTE3MDAsNiArMTcwOCwxMyBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFlheGlzbW92ZUtleToKKyAgICAgIC8vIERXSU4gd3JpdGVzIGN1cnJlbnRfcG9zaXRpb24gYmVmb3JlIGNhbGxpbmcgUlRTX2xpbmVfdG9fY3VycmVudC4KKyAgICAgIC8vIFJlamVjdCB1bnJlZmVyZW5jZWQgbW92ZXMgKmJlZm9yZSogbXV0YXRpbmcgcG9zaXRpb25hbCBzdGF0ZS4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogbWFudWFsIFhZWiBtb3ZlIGRlbmllZDsgaG9tZSBhbGwgYXhlcyBmaXJzdCIpOworICAgICAgICBicmVhazsKKyAgICAgIH0KICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICBmbG9hdCB5X21pbiwgeV9tYXg7CkBAIC0xNzIzLDYgKzE3MzgsMTMgQEAKICAgICAgIGJyZWFrOwogICAgIAogICAgIGNhc2UgWmF4aXNtb3ZlS2V5OgorICAgICAgLy8gRFdJTiB3cml0ZXMgY3VycmVudF9wb3NpdGlvbiBiZWZvcmUgY2FsbGluZyBSVFNfbGluZV90b19jdXJyZW50LgorICAgICAgLy8gUmVqZWN0IHVucmVmZXJlbmNlZCBtb3ZlcyAqYmVmb3JlKiBtdXRhdGluZyBwb3NpdGlvbmFsIHN0YXRlLgorICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQorICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBtYW51YWwgWFlaIG1vdmUgZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgIHsKICAgICAgICAgZmxvYXQgel9taW4sIHpfbWF4OwpAQCAtMTgwNSw2ICsxODI3LDExIEBACiAgICAgICBicmVhazsKIAogICAgIGNhc2UgRmlsYW1lbnRMb2FkS2V5OgorICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQorICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBmaWxhbWVudCBtb3Rpb24gZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYocmVjZGF0LmRhdGFbMF0gPT0gMSkKICAgICAgIHsKICAgICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkK')
+          pathlib.Path('dwin320.patch').write_bytes(patch)
+          print('DWIN320_INPUT=VERIFIED')
+          PY320
+          git -C oem_c13 apply --check ../dwin320.patch
+          git -C oem_c13 apply ../dwin320.patch
+          echo "ee22c1c99d10bd50b035d6550aff688a770c0fc224a921a59c109f0e1dadb040  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp" | sha256sum -c - | tee evidence/dwin320_hash.txt
+          grep -F 'SV04 DWIN: manual XYZ move denied' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -F 'G28 Z' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          if grep -Fq 'G28 Z0' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp; then exit 1; fi
+          echo 'DWIN320_INTEGRATED_ON_C13=YES' | tee evidence/dwin320_status.txt
+
+
+      - name: Apply DWIN321 audit security fixes after verified DWIN320
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'ee22c1c99d10bd50b035d6550aff688a770c0fc224a921a59c109f0e1dadb040  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin321_base_hash.txt
+          python3 - <<'PY321'
+          import base64, hashlib, pathlib
+          contents=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0xMzQ5LDggKzEzNDksOCBAQAogICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IGZhbHNlOwogICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZm9udCA9IGFjdGl2ZV9leHRydWRlcjsKICAgICAgICAgVXBkYXRlX1RpbWVfVmFsdWUgPSAwOworICAgICAgICAvLyBHMjggcmVzdWx0IG11c3QgYmUgY2hlY2tlZCBiZWZvcmUgYW55IGxhdGVyIFogbW92ZW1lbnQuCiAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzI4IikpOwotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcxIEYyMDAgWjAuMCIpKTsKICAgICAgICAgUlRTX1NuZERhdGEoRXhjaGFuZ2VQYWdlQmFzZSArIDMyLCBFeGNoYW5nZXBhZ2VBZGRyKTsKIAogICAgICAgICBpZiAoYWN0aXZlX2V4dHJ1ZGVyID09IDApCkBAIC0xNTA4LDYgKzE1MDgsMTAgQEAKICAgICAgIH0KICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDIpCiAgICAgICB7CisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFogYmFieXN0ZXAgZGVuaWVkOyBob21lIFogZmlyc3QiKTsKKyAgICAgICAgICBicmVhazsKKyAgICAgICAgfQogICAgICAgICBsYXN0X3pvZmZzZXQgPSB6cHJvYmVfem9mZnNldDsKICAgICAgICAgaWYgKFdJVEhJTigoenByb2JlX3pvZmZzZXQgKyAwLjA1KSwgWl9QUk9CRV9PRkZTRVRfUkFOR0VfTUlOLCBaX1BST0JFX09GRlNFVF9SQU5HRV9NQVgpKQogICAgICAgICB7CkBAIC0xNTIyLDYgKzE1MjYsMTAgQEAKICAgICAgIH0KICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDMpCiAgICAgICB7CisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFogYmFieXN0ZXAgZGVuaWVkOyBob21lIFogZmlyc3QiKTsKKyAgICAgICAgICBicmVhazsKKyAgICAgICAgfQogICAgICAgICBsYXN0X3pvZmZzZXQgPSB6cHJvYmVfem9mZnNldDsKICAgICAgICAgaWYgKFdJVEhJTigoenByb2JlX3pvZmZzZXQgLSAwLjA1KSwgWl9QUk9CRV9PRkZTRVRfUkFOR0VfTUlOLCBaX1BST0JFX09GRlNFVF9SQU5HRV9NQVgpKQogICAgICAgICB7CkBAIC0xNTYxLDcgKzE1NjksOSBAQAogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID09IDYpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgIENlbnRyZSAxCi0gICAgICAgIGlmKCFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTU3Myw3ICsxNTgzLDkgQEAKICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDcpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgRnJvbnQgTGVmdCAyCi0gICAgICAgIGlmKCFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTU4NSw3ICsxNTk3LDkgQEAKICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDgpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgRnJvbnQgUmlnaHQgMwotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE1OTcsNyArMTYxMSw5IEBACiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA5KQogICAgICAgewogICAgICAgICAvLyBBc3NpdGFudCBMZXZlbCAsIEJhY2sgUmlnaHQgNAotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MDksNyArMTYyNSw5IEBACiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxMCkKICAgICAgIHsKICAgICAgICAgLy8gQXNzaXRhbnQgTGV2ZWwgLCBCYWNrIExlZnQgNQotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgeyAgIAogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MjIsOCArMTY0MCw5IEBACiAgICAgICB7IAogICAgICAgICB3YWl0d2F5ID0gMzsKICAgICAgICAgUlRTX1NuZERhdGEoRXhjaGFuZ2VQYWdlQmFzZSArIDQwLCBFeGNoYW5nZXBhZ2VBZGRyKTsKKyAgICAgICAgLy8gTmV2ZXIgcXVldWUgRzM0IGltbWVkaWF0ZWx5IGFmdGVyIGhvbWluZzogZmFpbGVkIEcyOCBYIG11c3QKKyAgICAgICAgLy8gbm90IGxlYXZlIGEgcG90ZW50aWFsbHkgdW5zYWZlIGNhbGlicmF0aW9uIG1vdmUgaW4gdGhlIHF1ZXVlLgogICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBYIikpOwotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkczNCIpKTsKICAgICAgICAgVXBkYXRlX1RpbWVfVmFsdWUgPSAwOwogICAgICAgICB3YWl0d2F5ID0gMDsKICAgICAgIH0KQEAgLTI2NjUsNyArMjY4NCwxNCBAQAogICAgICAgICB9CiAgICAgICB9CiAKLSAgICAgIGlmKHBhdXNlX2FjdGlvbl9mbGFnICYmIChmYWxzZSA9PSBzZGNhcmRfcGF1c2VfY2hlY2spICYmIHByaW50aW5nSXNQYXVzZWQoKSAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgLy8gUGF1c2UgYXV0b21hdGlvbiBpcyBvdXRzaWRlIHRoZSBrZXkgZGlzcGF0Y2hlcjsgdGhlIHN0b3AgZ2F0ZSBhdAorICAgICAgLy8gUlRTX1JlY0RhdGEgYWxvbmUgY2Fubm90IHByb3RlY3QgdGhpcyBkaXJlY3QgcXVldWVkIG1vdGlvbiBwYXRoLgorICAgICAgaWYgKElzU3RvcHBlZCgpKSBwYXVzZV9hY3Rpb25fZmxhZyA9IGZhbHNlOworICAgICAgaWYgKHBhdXNlX2FjdGlvbl9mbGFnICYmICFJc1N0b3BwZWQoKQorICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpCisgICAgICAgICAgJiYgVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICAmJiAoZmFsc2UgPT0gc2RjYXJkX3BhdXNlX2NoZWNrKSAmJiBwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICBwYXVzZV9hY3Rpb25fZmxhZyA9IGZhbHNlOwogICAgICAgICBpZigoMSA9PSBhY3RpdmVfZXh0cnVkZXIpICYmICgxID09IHNhdmVfZHVhbF94X2NhcnJpYWdlX21vZGUpKQo=')
+          assert hashlib.sha256(contents).hexdigest() == '4fe00a4546169c138accd9914551daa3d8cad42b3b5fe9a454f9fe735422e8ed'
+          pathlib.Path('dwin321.patch').write_bytes(contents)
+          PY321
+          git -C oem_c13 apply --check ../dwin321.patch
+          git -C oem_c13 apply ../dwin321.patch
+          echo '96765b74b3051683ec5351550d0c5f8ee14c4d7690b4a2c66d49db3072b6c7c9  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin321_new_hash.txt
+          python3 - <<'PY321T'
+          import pathlib,re
+          s=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          assert 'queue.enqueue_now_P(PSTR("G1 F200 Z0.0"))' not in s
+          assert 'queue.enqueue_now_P(PSTR("G34"))' not in s
+          assert s.count('&& TEST(axis_trusted, Z_AXIS)') >= 6
+          assert 'if (IsStopped()) pause_action_flag = false;' in s
+          assert s.count('SV04 DWIN: Z babystep denied; home Z first') == 2
+          print('DWIN321_STATIC_CHECKS=PASS')
+          PY321T
+          echo 'DWIN321_INTEGRATED_ON_C13=YES' | tee evidence/dwin321_status.txt
+
+      - name: DWIN322 - verify 321 source, close toolchange/EEPROM paths, and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '96765b74b3051683ec5351550d0c5f8ee14c4d7690b4a2c66d49db3072b6c7c9  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin322_base_sha.txt
+          python3 - <<'PY322'
+          import base64,hashlib,pathlib
+          payload=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC05OCw3ICs5OCw4IEBACiBpbmxpbmUgdm9pZCBSVFNfbGluZV90b19jdXJyZW50KEF4aXNFbnVtIGF4aXMpCiB7CiAgIC8vIERlZmVuc2UtaW4tZGVwdGg6IERXSU4gbWFudWFsIG1vdmVzIGJ5cGFzcyB0aGUgRy1jb2RlIHN0b3AgZ2F0ZS4KLSAgaWYgKElzU3RvcHBlZCgpKSByZXR1cm47CisgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHJldHVybjsKICAgaWYgKCFwbGFubmVyLmlzX2Z1bGwoKSkKICAgewogICAgIHBsYW5uZXIuYnVmZmVyX2xpbmUoY3VycmVudF9wb3NpdGlvbiwgTU1NX1RPX01NUyhtYW51YWxfZmVlZHJhdGVfbW1fbVsoaW50OF90KWF4aXNdKSwgYWN0aXZlX2V4dHJ1ZGVyKTsKQEAgLTE3ODYsMTMgKzE3ODcsMTkgQEAKICAgICAgIH0KICAgICAgIGJyZWFrOwogICAgIGNhc2UgU2VsZWN0RXh0cnVkZXJLZXk6CisgICAgICAvLyBOZXZlciBjaGFpbiBHMjggWCBhbmQgVDAvVDE6IHRoZSBxdWV1ZWQgVCBjb21tYW5kIHdvdWxkIHN1cnZpdmUKKyAgICAgIC8vIGFuIHVuc3VjY2Vzc2Z1bCBob21pbmcgc2VxdWVuY2UuIFJlcXVpcmUgY29tcGxldGVkIFhZWiBob21pbmcgZmlyc3QuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKSkgeworICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IHRvb2xjaGFuZ2UgZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYocmVjZGF0LmRhdGFbMF0gPT0gMSkKICAgICAgIHsKICAgICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIGlmKGFjdGl2ZV9leHRydWRlciA9PSAwKQogICAgICAgICAgIHsKLSAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzI4IFgiKSk7CiAgICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIlQxIikpOwogICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyID0gMTsKICAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlcl9mbGFnID0gdHJ1ZTsKQEAgLTE4MDMsNyArMTgxMCw2IEBACiAgICAgICAgICAgfQogICAgICAgICAgIGVsc2UgaWYoYWN0aXZlX2V4dHJ1ZGVyID09IDEpCiAgICAgICAgICAgewotICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMjggWCIpKTsKICAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDAiKSk7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAwOwogICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZsYWcgPSBmYWxzZTsKQEAgLTE4MjEsNyArMTgyNyw2IEBACiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgaWYoYWN0aXZlX2V4dHJ1ZGVyID09IDApCiAgICAgICAgICAgewotICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMjggWCIpKTsKICAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDEiKSk7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IHRydWU7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAxOwpAQCAtMTgzMSw3ICsxODM2LDYgQEAKICAgICAgICAgICB9CiAgICAgICAgICAgZWxzZSBpZihhY3RpdmVfZXh0cnVkZXIgPT0gMSkKICAgICAgICAgICB7Ci0gICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBYIikpOwogICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJUMCIpKTsKICAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlcl9mbGFnID0gZmFsc2U7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAwOwpAQCAtMjMzOSw3ICsyMzQzLDEzIEBACiAgICAgICB9CiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA2KQogICAgICAgewotICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgIWNhcmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpIHsKKyAgICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIH0KKyAgICAgICAgZWxzZSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBFRVBST00gc2F2ZSBkZW5pZWQgd2hpbGUgcHJpbnRlciBhY3RpdmUiKTsKKyAgICAgICAgfQogICAgICAgICBydHNjaGVjay5SVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMSwgRXhjaGFuZ2VwYWdlQWRkcik7CiAgICAgICB9CiAgICAgICBicmVhazsKQEAgLTI0MzIsNyArMjQ0MiwxMyBAQAogICAgIGNhc2UgU2F2ZUVFUFJPTToKICAgICAgIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxKQogICAgICAgewotICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgIWNhcmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpIHsKKyAgICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIH0KKyAgICAgICAgZWxzZSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBFRVBST00gc2F2ZSBkZW5pZWQgd2hpbGUgcHJpbnRlciBhY3RpdmUiKTsKKyAgICAgICAgfQogICAgICAgfQogICAgIGJyZWFrOwogICAgIGNhc2UgQ2hhbmdlUGFnZUtleToK')
+          assert hashlib.sha256(payload).hexdigest() == '36fec36140d72a430741d379f671dc87bab995a6a1f510984d4787ed031bc165'
+          pathlib.Path('dwin322.patch').write_bytes(payload)
+          print('DWIN322_PATCH_HASH=OK')
+          PY322
+          git -C oem_c13 apply --check ../dwin322.patch
+          git -C oem_c13 apply ../dwin322.patch
+          echo 'ae9e354e3b2f714bb90c7540589a0d4b44bbffee3fa8de79f0d9a5443dc833c5  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin322_output_sha.txt
+          python3 - <<'PY322TEST'
+          import pathlib,re,hashlib
+          s=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          block=s.split('    case SelectExtruderKey:',1)[1].split('    case FilamentLoadKey:',1)[0]
+          assert 'queue.enqueue_now_P(PSTR("G28 X"));' not in block
+          assert block.count('queue.enqueue_now_P(PSTR("T1"));')==2
+          assert block.count('queue.enqueue_now_P(PSTR("T0"));')==2
+          assert 'SV04 DWIN: toolchange denied; home all axes first' in block
+          assert 'if (IsStopped() || !TEST(axis_trusted, X_AXIS)' in block
+          assert s.count('SV04 DWIN: EEPROM save denied while printer active')==2
+          assert s.count('!card.isPrinting() && !printingIsPaused()')==2
+          assert s.count('settings.save();')==6 # including 4 commented sites
+          assert 'if (IsStopped() || !TEST(axis_trusted, X_AXIS)' in s.split('inline void RTS_line_to_current',1)[1].split('RTSSHOW::RTSSHOW',1)[0]
+          print('DWIN322_SOURCE_TESTS=PASS')
+          PY322TEST
+          echo 'DWIN322_INTEGRATED_ON_C13=YES' | tee evidence/dwin322_status.txt
+
+      - name: Apply verified DWIN323 safety patch on DWIN322 (NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY323'
+          import pathlib, hashlib, base64
+          p=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='ae9e354e3b2f714bb90c7540589a0d4b44bbffee3fa8de79f0d9a5443dc833c5'
+          assert hashlib.sha256(p.read_bytes()).hexdigest() == expected, 'Unexpected DWIN322 source; refuse patch'
+          payload=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0yMDU1LDYgKzIwNTUsMTUgQEAKICAgICBjYXNlIFBvd2VyQ29udGludWVQcmludEtleToKICAgICAgIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxKQogICAgICAgeworICAgICAgICAvLyBTVjA0IDMyMzogTmV2ZXIgc3RhcnQgcG93ZXItbG9zcyByZXBsYXkgd2l0aCB1bnRydXN0ZWQgYXhlcy4KKyAgICAgICAgLy8gVGhlIG9wZXJhdG9yIG11c3QgZXhwbGljaXRseSBlc3RhYmxpc2ggYSBzYWZlIG1hY2hpbmUgc3RhdGUgZmlyc3QuCisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICAgIHx8IGNhcmQuaXNQcmludGluZygpIHx8IHByaW50aW5nSXNQYXVzZWQoKQorICAgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBwb3dlci1sb3NzIHJlc3VtZSBkZW5pZWQ7IHZlcmlmeSBob21lIGFuZCBpZGxlIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0KICAgICAgICAgI2lmIEVOQUJMRUQoRFVBTF9YX0NBUlJJQUdFKQogICAgICAgICAgIHNhdmVfZHVhbF94X2NhcnJpYWdlX21vZGUgPSBkdWFsWFByaW50aW5nTW9kZVN0YXR1czsKICAgICAgICAgICBzd2l0Y2goc2F2ZV9kdWFsX3hfY2FycmlhZ2VfbW9kZSkKQEAgLTIzNTcsNiArMjM2NiwxMiBAQAogICAgIGNhc2UgU3RvcmVNZW1vcnlLZXk6CiAgICAgICBpZihyZWNkYXQuZGF0YVswXSA9PSAweEYxKQogICAgICAgeworICAgICAgICAvLyBTVjA0IDMyMzogUmVpbml0aWFsaXphdGlvbiBtdXRhdGVzIHBlcnNpc3RlbnQgc2V0dGluZ3MsIG5vdCBhIHJlYWQuCisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCBjYXJkLmlzUHJpbnRpbmcoKSB8fCBwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgIHx8IHBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkgeworICAgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogRUVQUk9NIGluaXQgZGVuaWVkIHdoaWxlIHByaW50ZXIgYWN0aXZlIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0KICAgICAgICAgc2V0dGluZ3MuaW5pdF9lZXByb20oKTsKICAgICAgICAgI2lmIEVOQUJMRUQoQVVUT19CRURfTEVWRUxJTkdfQklMSU5FQVIpCiAgICAgICAgICAgYm9vbCB6aWcgPSBmYWxzZTsKQEAgLTIzOTcsNiArMjQxMiwxMSBAQAogICAgICAgfQogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gMHhGMCkKICAgICAgIHsKKyAgICAgICAgaWYgKElzU3RvcHBlZCgpIHx8IGNhcmQuaXNQcmludGluZygpIHx8IHByaW50aW5nSXNQYXVzZWQoKQorICAgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBvZmZzZXQgYXBwbHkgZGVuaWVkIHdoaWxlIGFjdGl2ZSIpOworICAgICAgICAgIGJyZWFrOworICAgICAgICB9CiAgICAgICAgIG1lbXNldChjb21tYW5kYnVmLCAwLCBzaXplb2YoY29tbWFuZGJ1ZikpOwogICAgICAgICBzcHJpbnRmX1AoY29tbWFuZGJ1ZiwgUFNUUigiTTIxOCBUMSBYJTQuMWYiKSwgaG90ZW5kX29mZnNldFsxXS54KTsKICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChjb21tYW5kYnVmKTsKQEAgLTI0MTAsNiArMjQzMCwxMiBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFhob3RlbmRPZmZzZXRLZXk6CisgICAgICAvLyBTVjA0IDMyMzogT2Zmc2V0IGVkaXRzIGNoYW5nZSBJREVYIGdlb21ldHJ5LiBPbmx5IHdoZW4gc2FmZWx5IGlkbGUuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgY2FyZC5pc1ByaW50aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogSURFWCBvZmZzZXQgZWRpdCBkZW5pZWQgd2hpbGUgYWN0aXZlIik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID49IDMyNzY4KQogICAgICAgewogICAgICAgICBob3RlbmRfb2Zmc2V0WzFdLnggPSAocmVjZGF0LmRhdGFbMF0gLSA2NTUzNikgLyAxMDAuMDsKQEAgLTI0MjUsNiArMjQ1MSwxMiBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFlob3RlbmRPZmZzZXRLZXk6CisgICAgICAvLyBTVjA0IDMyMzogT2Zmc2V0IGVkaXRzIGNoYW5nZSBJREVYIGdlb21ldHJ5LiBPbmx5IHdoZW4gc2FmZWx5IGlkbGUuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgY2FyZC5pc1ByaW50aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogSURFWCBvZmZzZXQgZWRpdCBkZW5pZWQgd2hpbGUgYWN0aXZlIik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID49IDMyNzY4KQogICAgICAgewogICAgICAgICBob3RlbmRfb2Zmc2V0WzFdLnkgPSAocmVjZGF0LmRhdGFbMF0gLSA2NTUzNikgLyAxMDAuMDsK')
+          pathlib.Path('dwin323.patch').write_bytes(payload)
+          print('DWIN323_BASE_HASH=OK')
+          PY323
+          git -C oem_c13 apply --check ../dwin323.patch
+          git -C oem_c13 apply ../dwin323.patch
+          echo "7cc50482d5f805887429d0de2b029d69557290e0ecd674cad9abbe9210f425cf  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp" | sha256sum -c - | tee evidence/dwin323_hash.txt
+          python3 - <<'PY323TEST'
+          from pathlib import Path
+          s=Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          assert 'SV04 DWIN: EEPROM init denied while printer active' in s
+          assert 'SV04 DWIN: power-loss resume denied; verify home and idle' in s
+          assert s.count('SV04 DWIN: IDEX offset edit denied while active')==2
+          assert 'SV04 DWIN: offset apply denied while active' in s
+          assert s.count('SV04 DWIN: EEPROM save denied while printer active')==2
+          print('DWIN323_SOURCE_TESTS=PASS')
+          PY323TEST
+          echo 'DWIN323_INTEGRATED_ON_C13=YES' | tee evidence/dwin323_status.txt
+
+
+      - name: Apply DWIN325 fail-closed mesh activation patch (strict SHA256, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY325'
+          from pathlib import Path
+          import hashlib
+          p=Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='7cc50482d5f805887429d0de2b029d69557290e0ecd674cad9abbe9210f425cf'
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==expected, 'DWIN323 source mismatch; refuse patch'
+          s=p.read_text()
+          needle='queue.enqueue_now_P(PSTR("M420 S1"));'
+          assert s.count(needle)==3, 'unexpected M420 S1 call count'
+          s=s.replace(needle, '// SV04 325: Do not enable leveling without a verified, machine-specific mesh.\n    // Activate deliberately with M420 S1 only after mesh validation.')
+          p.write_text(s)
+          assert s.count(needle)==0
+          assert 'SV04 DWIN: EEPROM init denied while printer active' in s
+          assert 'SV04 DWIN: power-loss resume denied; verify home and idle' in s
+          print('DWIN325_SOURCE_CHECKS=PASS')
+          print('DWIN325_SHA256='+hashlib.sha256(p.read_bytes()).hexdigest())
+          PY325
+          echo 'DWIN325_INTEGRATED_ON_C13=YES' | tee evidence/dwin325_status.txt
+
+      - name: Apply 328A settings.cpp patch on the DWIN325 tree and run its host tests (strict hashes, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          F328=""
+          for f in SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS*.zip; do
+            if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "313b095bb25c18ba57fb4866f202bd3630ce59f20801a72cbbe9124cbc7a94fd" ]; then F328="$f"; break; fi
+          done
+          test -n "$F328" || { echo "FEHLT: SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS*.zip mit sha256 313b095bb25c18ba57fb4866f202bd3630ce59f20801a72cbbe9124cbc7a94fd im Repository-Stamm" >&2; ls -la >&2; exit 1; }
+          echo "F328=$F328" | tee -a evidence/input_names.txt
+          unzip -t "$F328" > evidence/zip_328a_integrity.txt
+          unzip -q "$F328" -d c328pkg
+          P=c328pkg/SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS
+          sha256sum oem_c13/Marlin/src/module/settings.cpp | tee evidence/settings_before_328a.txt
+          grep -F "e62c86fe73b7583486f412662c9db0f740b5dceea50734aa4c4eb02718303338" evidence/settings_before_328a.txt
+          python3 -I $P/02_PATCH/apply_328.py oem_c13/Marlin 2>&1 | tee evidence/apply_328a.txt
+          grep -F "bb5043f4d6df93df6c1d030fc677ffa5478ba59d04a9fd3d548769610ab9bd66" evidence/apply_328a.txt
+          cmp oem_c13/Marlin/src/module/settings.cpp $P/01_QUELLEN/geaendert/Marlin/src/module/settings.cpp
+          (cd $P/03_TESTS && python3 -I test_328.py) 2>&1 | tee evidence/c328a_host_tests.txt
+          grep -F "0 FAIL" evidence/c328a_host_tests.txt
+          # Belege fuer die Annahmen der Hosttests (echte Makrodefinitionen im Baum)
+          grep -rnE "define +(EEPROM_START|EEPROM_READ|EEPROM_READ_ALWAYS|EEPROM_WRITE|EEPROM_SKIP|EEPROM_FINISH)\b" oem_c13/Marlin/src > evidence/eeprom_macros_real.txt || true
+          grep -rnE "define +(SERIAL_ERROR_MSG|SERIAL_ERROR_START|SERIAL_ECHOLNPGM)\b" oem_c13/Marlin/src > evidence/serial_macros_real.txt || true
+          cat evidence/eeprom_macros_real.txt evidence/serial_macros_real.txt | head -40
+
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c13/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c13/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c13 -e STM32F103RET6_creality > "evidence/c13/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c13/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c13/$profile/build.log"
+              build_rc=42
+            fi
+            if [ "$build_rc" -eq 0 ]; then
+              mkdir -p "bin/$profile"
+              find oem_c13/.pio/build/STM32F103RET6_creality -maxdepth 1 -type f \( -name '*.bin' -o -name 'firmware.elf' \) -exec cp {} "bin/$profile/" \;
+              (cd "bin/$profile" && sha256sum * > SHA256SUMS.txt 2>/dev/null) || true
+              echo 'C13+DWIN319+DWIN320+DWIN321+DWIN322+DWIN323+DWIN325: DEVELOPMENT ONLY. FLASH_ALLOWED=NO HARDWARE_TESTED=NO. DWIN and IDEX hardware safety still unverified.' > "bin/$profile/NOT_APPROVED.txt"
+            fi
+            {
+              echo "BUILD_TREE=oem_c13"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C13_PLUS_DWIN319_DWIN320_DWIN321_DWIN322_DWIN323_DWIN325_ON_C12_ON_C11_ON_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c13/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c13/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Upload compiled firmware files (NOT approved for flashing)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_328A_INTEGRATED_BINARIES_NO_FLASH_APPROVAL
+          path: bin/
+          if-no-files-found: warn
+
+      - name: Export sources and CORRECT preprocessor extracts for the EEPROM chain test (NON-FATAL, no effect on build result)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          unset PLATFORMIO_BUILD_FLAGS
+          mkdir -p export/src export/pre
+          for pat in settings.cpp settings.h 'M500-M504.cpp' 'eeprom*.cpp' 'eeprom*.h' 'persistent_store*' 'serial.h' 'macros.h' 'MarlinConfig.h' powerloss.cpp powerloss.h; do
+            find oem_c13/Marlin/src -name "$pat" -print | while read -r f; do mkdir -p "export/src/$(dirname "${f#oem_c13/}")"; cp "$f" "export/src/${f#oem_c13/}"; done
+          done
+          cp oem_c13/Marlin/Configuration.h oem_c13/Marlin/Configuration_adv.h export/src/ 2>/dev/null
+          cp evidence/eeprom_macros_real.txt evidence/serial_macros_real.txt export/ 2>/dev/null
+          /tmp/sv04_pio_309/bin/pio run -d oem_c13 -e STM32F103RET6_creality -t compiledb > export/pre/compiledb.log 2>&1
+          python3 - <<'PYX' > export/pre/LOG.txt 2>&1
+          import json, re, shlex, subprocess, os, glob
+          root = os.path.abspath('oem_c13'); outdir = os.path.abspath('export/pre')
+          db = glob.glob('oem_c13/compile_commands.json') + glob.glob('oem_c13/.pio/build/*/compile_commands.json')
+          print('compile_commands:', db)
+          want = ('settings.cpp', 'M500-M504.cpp', 'eeprom_flash.cpp', 'eeprom_wired.cpp', 'eeprom_bl24cxx.cpp', 'eeprom_if.cpp')
+          if db:
+              for e in json.load(open(db[0])):
+                  d = e.get('directory') or root
+                  f = os.path.normpath(os.path.join(d, e['file']))
+                  if os.path.basename(f) not in want: continue
+                  a = shlex.split(e.get('command') or ' '.join(e['arguments'])); out = []; i = 0
+                  while i < len(a):
+                      if a[i] == '-o': i += 2; continue
+                      if a[i] == '-c': i += 1; continue
+                      out.append(a[i]); i += 1
+                  rel = os.path.relpath(f, root) if f.startswith(root) else f
+                  base = re.sub(r'[^A-Za-z0-9_.]+', '_', rel).strip('_')
+                  for flag, suf in (('-E', '.i'), ('-E -dM', '.macros')):
+                      r = subprocess.run(out + flag.split() + ['-o', os.path.join(outdir, base + suf)], capture_output=True, text=True, cwd=d)
+                      print(base, flag, 'rc=%d' % r.returncode, r.stderr[:300].replace('\n', ' '))
+          PYX
+          (cd export && find . -type f ! -name SHA256SUMS.txt | sort | xargs sha256sum > SHA256SUMS.txt)
+          du -sh export; cat export/pre/LOG.txt | head -20
+      - name: Upload source export (diagnostic only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_328A_EEPROM_SOURCE_EXPORT_DIAGNOSTIC
+          path: export/
+          if-no-files-found: ignore
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C13_DWIN325_CHANGED_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  evaluate_builds:
+    name: "Evaluate both build jobs (no blanket success; red unless all four combinations are proven PASS)"
+    runs-on: ubuntu-24.04
+    needs: [baseline_c12, c13_changes]
+    if: always()
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify and unpack the C9 package (evaluator; resolved by prefix + SHA-256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c -
+          unzip -q "$F9" -d c9pkg
+      - name: Download both build artifacts (whatever exists)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SV04_C13_*_STM32_LOGS_NO_FLASH
+          path: art
+      - name: Evaluate (exit code 0 only if oem_c12 and oem_c13 are PASS for both profiles)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evaluation
+          python3 c9pkg/02_PATCHES/evaluate_builds_c9.py art --trees oem_c12,oem_c13 --out evaluation/EVALUATION.md 2>&1 | tee evaluation/evaluation_stdout.txt
+          exit "${PIPESTATUS[0]}"
+      - name: Upload evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C13_DWIN325_EVALUATION
+          path: evaluation/
+          if-no-files-found: warn
