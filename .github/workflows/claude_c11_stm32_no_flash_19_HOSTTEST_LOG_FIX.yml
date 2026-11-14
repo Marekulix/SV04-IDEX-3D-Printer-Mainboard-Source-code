@@ -1,0 +1,464 @@
+name: "C11 FIX19 - SD print after stop (freeze + silent abort) on C10 on C9 on 318 (route B, STRICT installer), baseline C10 vs C11 copy, STM32 NO FLASH, source export, evaluated (number-free)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline_c10:
+    name: "Baseline build: NEW C10 copy (318 + C9 + C10), both profiles"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (318 hand-over, Claude C9 package, Claude C10 package)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence c318 c9pkg c10pkg
+          echo 'b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  SV04_NEXT_318_GITHUB_UPLOAD_06.zip' | sha256sum -c - | tee evidence/input_318_sha.txt
+          echo 'd7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip' | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t SV04_NEXT_318_GITHUB_UPLOAD_06.zip > evidence/zip_318_integrity.txt
+          unzip -t SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip > evidence/zip_c9_integrity.txt
+          unzip -q SV04_NEXT_318_GITHUB_UPLOAD_06.zip -d c318
+          unzip -q SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip -d c9pkg
+          echo 'b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip' | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip" > evidence/zip_c10_integrity.txt
+          unzip -q "SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip" -d c10pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Run Claude C9 and C10 host regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04host && /tmp/sv04host/bin/pip install pyyaml > evidence/pip_host.txt 2>&1
+          export PATH=/tmp/sv04host/bin:$PATH
+          (cd c9pkg && python3 run_tests.py --logs ../evidence/c9_host_tests) 2>&1 | tee evidence/c9_host_tests_summary.txt
+          grep -q 'GESAMT: ALLE TESTS BESTANDEN' evidence/c9_host_tests_summary.txt
+          (cd c10pkg/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_host_tests.txt
+          grep -qx 'OK' evidence/c10_host_tests.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c10_base/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c10/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c10 -e STM32F103RET6_creality > "evidence/c10_base/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c10_base/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c10_base/$profile/build.log"
+              build_rc=42
+            fi
+            {
+              echo "BUILD_TREE=oem_c10"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c10_base/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c10_base/$profile/build.log" > "evidence/c10_base/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c10_base/$profile/build.log" > "evidence/c10_base/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c10_base/$profile/build.log" > "evidence/c10_base/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c10_base/$profile/build.log" > "evidence/c10_base/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c10_base/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C11_BASELINE_C10_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  c11_changes:
+    name: "C11 build: NEW copy (C10 + C11 SD freeze and silent SD abort), both profiles, source export"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (318 hand-over, Claude C9 package, Claude C10 package, Claude C11 package)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence c318 c9pkg c10pkg c11pkg
+          echo 'b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  SV04_NEXT_318_GITHUB_UPLOAD_06.zip' | sha256sum -c - | tee evidence/input_318_sha.txt
+          echo 'd7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip' | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t SV04_NEXT_318_GITHUB_UPLOAD_06.zip > evidence/zip_318_integrity.txt
+          unzip -t SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip > evidence/zip_c9_integrity.txt
+          unzip -q SV04_NEXT_318_GITHUB_UPLOAD_06.zip -d c318
+          unzip -q SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip -d c9pkg
+          echo 'b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip' | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip" > evidence/zip_c10_integrity.txt
+          unzip -q "SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE (1).zip" -d c10pkg
+          echo 'bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e  SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY (1).zip' | sha256sum -c - | tee evidence/input_c11_sha.txt
+          unzip -t "SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY (1).zip" > evidence/zip_c11_integrity.txt
+          unzip -q "SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY (1).zip" -d c11pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Apply C11 patch to a NEW copy of C10 (C9/C10 trees stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c10 oem_c11
+          python3 c11pkg/02_PATCHES/apply_c11.py oem_c11 2>&1 | tee evidence/apply_c11.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "MarlinCore.cpp: PATCHED" evidence/apply_c11.txt
+          diff -rq oem_c10 oem_c11 2>&1 | tee evidence/diff_c10_vs_c11.txt || true
+          test "$(diff -rq oem_c10 oem_c11 | wc -l)" -eq 3
+          grep -F "gcode/queue.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "control/M999.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c10_vs_c11.txt
+          sha256sum oem_c11/Marlin/src/gcode/queue.cpp oem_c11/Marlin/src/gcode/control/M999.cpp oem_c11/Marlin/src/MarlinCore.cpp | tee evidence/source_hashes_c11.txt
+      - name: Run Claude C11 host tests and C10 regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c11pkg/03_TESTS && python3 -B test_c11.py) 2>&1 | tee evidence/c11_host_tests.txt
+          grep -qx 'OK' evidence/c11_host_tests.txt
+          (cd c11pkg/03_TESTS && python3 -B test_c11_homeaxis_anker.py) 2>&1 | tee evidence/c11_homeaxis_anker.txt
+          grep -qx 'OK' evidence/c11_homeaxis_anker.txt
+          (cd c11pkg/03_TESTS/regression_c10/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_regression_in_c11.txt
+          grep -qx 'OK' evidence/c10_regression_in_c11.txt
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c11/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c11/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c11 -e STM32F103RET6_creality > "evidence/c11/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c11/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c11/$profile/build.log"
+              build_rc=42
+            fi
+            {
+              echo "BUILD_TREE=oem_c11"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C11_ON_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c11/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c11/$profile/build.log" > "evidence/c11/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c11/$profile/build.log" > "evidence/c11/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c11/$profile/build.log" > "evidence/c11/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c11/$profile/build.log" > "evidence/c11/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c11/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Config blob check (non-fatal) and export of missing OEM sources
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p export evidence
+          {
+            echo "Configuration.h blob: $(git hash-object oem_c11/Marlin/Configuration.h) (erwartet b226c552...)"
+            echo "Configuration_adv.h blob: $(git hash-object oem_c11/Marlin/Configuration_adv.h) (erwartet 8b876d83...)"
+          } | tee evidence/config_blob_check.txt
+          (cd oem_c11 && find . -path ./.pio -prune -o -type f \( -name 'cardreader.cpp' -o -name 'cardreader.h' -o -name 'M106_M107.cpp' -o -name 'M106.cpp' -o -name 'M107.cpp' -o -name 'temperature.cpp' -o -name 'temperature.h' -o -name 'Configuration.h' -o -name 'Configuration_adv.h' -o -name 'platformio.ini' -o -name 'Conditionals_post.h' -o -name 'Conditionals_adv.h' -o -name 'Conditionals_LCD.h' -o -name 'G0_G1.cpp' -o -name 'pins.h' \) -print) > export/FILELIST.txt
+          while read -r f; do mkdir -p "export/$(dirname "$f")"; cp "oem_c11/$f" "export/$f"; done < export/FILELIST.txt
+          (cd export && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          wc -l export/FILELIST.txt
+      - name: Upload source export
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C11_QUELLEN_EXPORT
+          path: export/
+          if-no-files-found: warn
+      - name: Preprocessor extract of the real build macros (non-fatal, for the homeaxis harness)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          mkdir -p preproc
+          TCBIN=$(find "$HOME" /tmp -maxdepth 8 -type d -path '*packages/toolchain-gccarmnoneeabi*/bin' 2>/dev/null | head -1)
+          export PATH="$TCBIN:$PATH"; echo "TCBIN=$TCBIN" > preproc/toolchain.txt
+          /tmp/sv04_pio_309/bin/pio run -d oem_c11 -e STM32F103RET6_creality -t compiledb > preproc/compiledb.log 2>&1
+          find oem_c11 -name compile_commands.json -exec cp {} preproc/compile_commands.json \; 
+          python3 - <<'PYP'
+          import json, shlex, subprocess, pathlib
+          want = ['module/motion.cpp', 'gcode/calibrate/G28.cpp', 'feature/bltouch.cpp', 'module/probe.cpp', 'module/endstops.cpp', 'gcode/queue.cpp', 'MarlinCore.cpp', 'gcode/control/M999.cpp']
+          log = []
+          try: cc = json.load(open('preproc/compile_commands.json'))
+          except Exception as ex: cc = []; log.append('compile_commands.json fehlt: %r' % ex)
+          for e in cc:
+              for w in want:
+                  if e['file'].endswith('Marlin/src/' + w):
+                      args = shlex.split(e.get('command') or ' '.join(e['arguments'])); out = []; skip = False
+                      for a in args:
+                          if skip: skip = False; continue
+                          if a == '-o': skip = True; continue
+                          if a == '-c' or a.startswith('-M'): continue
+                          out.append(a)
+                      for flags, ext in ((['-E'], 'i'), (['-E', '-dM'], 'macros')):
+                          r = subprocess.run(out + flags, cwd=e['directory'], capture_output=True, text=True)
+                          pathlib.Path('preproc/%s.%s' % (w.replace('/', '_'), ext)).write_text(r.stdout)
+                          log.append('%s %s rc=%d bytes=%d err=%s' % (w, ' '.join(flags), r.returncode, len(r.stdout), r.stderr[-200:].replace(chr(10), ' ')))
+          pathlib.Path('preproc/LOG.txt').write_text(chr(10).join(log) + chr(10)); print(chr(10).join(log))
+          PYP
+      - name: Upload preprocessor extract
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C11_PRAEPROZESSOR
+          path: preproc/
+          if-no-files-found: warn
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C11_CHANGED_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  evaluate_builds:
+    name: "Evaluate both build jobs (no blanket success; red unless all four combinations are proven PASS)"
+    runs-on: ubuntu-24.04
+    needs: [baseline_c10, c11_changes]
+    if: always()
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify and unpack the C9 package (evaluator)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'd7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip' | sha256sum -c -
+          unzip -q SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS.zip -d c9pkg
+      - name: Download both build artifacts (whatever exists)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SV04_C11_*_STM32_LOGS_NO_FLASH
+          path: art
+      - name: Evaluate (exit code 0 only if oem_c10 and oem_c11 are PASS for both profiles)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evaluation
+          python3 c9pkg/02_PATCHES/evaluate_builds_c9.py art --trees oem_c10,oem_c11 --out evaluation/EVALUATION.md 2>&1 | tee evaluation/evaluation_stdout.txt
+          exit "${PIPESTATUS[0]}"
+      - name: Upload evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_C11_EVALUATION
+          path: evaluation/
+          if-no-files-found: warn
