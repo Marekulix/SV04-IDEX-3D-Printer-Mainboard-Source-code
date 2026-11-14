@@ -1,0 +1,87 @@
+name: "SV04 NEXT Workflow 33 - Version 325 hardware readiness and source evidence audit NO FLASH"
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit_325:
+    name: "Independent audit of V325 source-export + binary evidence, no firmware changes"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout OEM sources (read only)
+        uses: actions/checkout@v4
+      - name: Fetch verified V325 build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit/exports audit/binaries audit/report
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/14124017894/zip" > audit/export.zip
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/14124071963/zip" > audit/binaries.zip
+          unzip -t audit/export.zip > audit/report/export_integrity.txt
+          unzip -t audit/binaries.zip > audit/report/binaries_integrity.txt
+          unzip -q audit/export.zip -d audit/exports
+          unzip -q audit/binaries.zip -d audit/binaries
+          sha256sum audit/export.zip audit/binaries.zip > audit/report/artifacts_sha256.txt
+      - name: Audit actual exported integration sources and firmware evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, re
+          from pathlib import Path
+          base=Path('audit'); src=base/'exports'; bins=base/'binaries'; out=base/'report'
+          actual_files=[p for p in src.rglob('*') if p.is_file()]
+          report={'version':'325','workflow':'33','flash_allowed':False,'hardware_tested':False,
+                  'source_artifact_id':14124017894,'binary_artifact_id':14124071963,
+                  'source_files':[], 'firmware_files':[], 'findings':[], 'limitations':[]}
+          for p in sorted(actual_files):
+            rel=str(p.relative_to(src))
+            report['source_files'].append({'path':rel,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+            if p.suffix not in ('.cpp','.h','.hpp'):continue
+            lines=p.read_text(errors='replace').splitlines()
+            patterns={'IDEX':['DUAL_X_CARRIAGE','X2_HOME','X2_MIN','X2_MAX','tool_change','axis_trusted'],
+                      'BLTouch/G28':['BLTOUCH','Z_SAFE_HOMING','G28','homeaxis','endstops','probe'],
+                      'EEPROM':['settings.load','settings.save','M500','M501','M503','init_eeprom'],
+                      'Powerloss':['recovery.resume','recovery.save','power_loss','powerloss'],
+                      'Mesh':['M420 S1','bedlevel','leveling_active']}
+            for topic,keys in patterns.items():
+              hits=[{'line':i+1,'text':line.strip()[:180]} for i,line in enumerate(lines)
+                    if any(key.lower() in line.lower() for key in keys)]
+              if hits: report['findings'].append({'file':rel,'topic':topic,'matches':hits[:60],
+                                                   'total_matches':len(hits)})
+          for p in sorted(bins.rglob('firmware.bin')):
+            report['firmware_files'].append({'path':str(p.relative_to(bins)),
+                 'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          for p in bins.rglob('NOT_APPROVED.txt'):
+            txt=p.read_text(errors='replace')
+            if 'FLASH_ALLOWED=NO' not in txt or 'HARDWARE_TESTED=NO' not in txt:
+              raise RuntimeError('Missing safety notice in '+str(p))
+          if len(report['firmware_files'])!=2:
+            raise RuntimeError('Expected exactly two version 325 firmware.bin files; got '+str(len(report['firmware_files'])))
+          expected_names={'Configuration.h','Configuration_adv.h','G28.cpp','tool_change.cpp','motion.cpp','MarlinCore.cpp'}
+          names={p.name for p in actual_files}
+          missing=expected_names-names
+          if missing:raise RuntimeError('Source export is incomplete: '+str(sorted(missing)))
+          report['limitations']=[
+            'Source export from workflow 32 does NOT include final LCD_RTS.cpp.',
+            'Source export does NOT include integrated settings.cpp; OEM master is not an EEPROM readback validation.',
+            'Firmware build success does not prove correct EEPROM values after reboot or power interruption.',
+            'Actual T0/T1 clearance, BLTouch switch operation and DWIN resource library must be tested on hardware.',
+            'No installation or flash is authorized by this workflow.' ]
+          (out/'SOURCE_AND_BIN_AUDIT.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+          (out/'ERGEBNIS.txt').write_text('SV04 NEXT 325 ABNAHME-EVIDENZ: '+str(len(actual_files))+' source files; '+str(len(report['firmware_files']))+' firmware.bin files\n'+
+             'RESULT=SOURCE_EXPORT_AND_BINARIES_VERIFIED\nFLASH_ALLOWED=NO\nHARDWARE_TESTED=NO\n'+
+             '\n'.join('OFFEN: '+x for x in report['limitations'])+'\n')
+          print((out/'ERGEBNIS.txt').read_text())
+          PY
+      - name: Upload audit evidence independent of build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_326_WORKFLOW33_ABNAHME_EVIDENZ_NO_FLASH
+          path: audit/report/
+          if-no-files-found: warn
