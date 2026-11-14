@@ -1,0 +1,77 @@
+name: SV04-NEXT Workflow 34 - EEPROM-Ruecklesung aus integrierten C13+DWIN325 Quellen, NO FLASH
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  integrated_eeprom_audit:
+    name: Reconstruct verified 325 sources, export EEPROM/DWIN evidence, NO FLASH
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+    - name: Checkout input files (existing repo, no changes)
+      uses: actions/checkout@v4
+    - name: Install YAML parser for exact replay of Workflow32 source steps
+      shell: bash
+      run: 'python3 -m pip install --user --break-system-packages PyYAML==6.0.2
+
+        '
+    - name: Reproduce 325 integrated source tree using the unchanged Workflow32 steps (STOP before firmware build)
+      shell: bash
+      run: "set -euo pipefail\npython3 - <<'PYREPLAY'\nimport pathlib,subprocess,os,yaml,sys\nsrc=pathlib.Path('.github/workflows/SV04_NEXT_WORKFLOW_32_C13_DWIN325_M420_FAILCLOSED_NO_FLASH.yml')\n\
+        assert src.exists(), 'Pinned source workflow32 missing'\nwf=yaml.safe_load(src.read_text())\nsteps=wf['jobs']['c13_changes']['steps']\n\
+        # Stop at the original independent STM32 build.  Each shell block is executed in\n# its own process, matching GitHub\
+        \ Actions step isolation and strict error mode.\nexecuted=[]\nfor i,step in enumerate(steps):\n name=step.get('name','')\n\
+        \ if name.startswith('Build STM32 profiles independently'):break\n if 'uses' in step:\n  assert step['uses']=='actions/checkout@v4',\
+        \ 'Unexpected external action in replay: '+str(step['uses'])\n  executed.append('CHECKOUT already performed')\n  continue\n\
+        \ script=step.get('run','')\n assert script and isinstance(script,str), 'Missing source-build script: '+name\n print('REPLAY_STEP',i,name,flush=True)\n\
+        \ ret=subprocess.run(['bash','--noprofile','--norc','-e','-o','pipefail','-c',script],env=os.environ.copy()).returncode\n\
+        \ assert ret==0, f'Workflow32 original source step failed: {name} rc={ret}'\n executed.append(name)\nelse:\n raise\
+        \ RuntimeError('Expected STM32 build stop point not found')\nassert any('DWIN325' in n for n in executed), 'DWIN325\
+        \ integration was not replayed'\nassert pathlib.Path('oem_c13/Marlin/src/module/settings.cpp').exists(), 'EEPROM integrated\
+        \ source missing'\npathlib.Path('replay34.txt').write_text('\\n'.join(executed)+'\\n')\nprint('WORKFLOW34_SOURCE_REPLAY=PASS')\n\
+        PYREPLAY\n"
+    - name: Export and inspect EEPROM readback, M500-M504 and DWIN integrated files
+      shell: bash
+      run: "set -euo pipefail\npython3 - <<'PY34'\nfrom pathlib import Path\nimport hashlib, json, re, shutil\nroot=Path('oem_c13/Marlin')\n\
+        assert root.exists(), 'Integrated C13 source tree is missing'\nreport_dir=Path('audit34')\n(report_dir/'integrated').mkdir(parents=True,exist_ok=True)\n\
+        files={\n 'settings_cpp':root/'src/module/settings.cpp',\n 'settings_h':root/'src/module/settings.h',\n 'lcd_rts':root/'src/lcd/e3v2/creality/LCD_RTS.cpp',\n\
+        \ 'm500_504':root/'src/gcode/eeprom/M500-M504.cpp',\n 'configuration':root/'Configuration.h',\n 'configuration_adv':root/'Configuration_adv.h',\n\
+        \ 'powerloss_cpp':root/'src/feature/powerloss.cpp',\n 'powerloss_h':root/'src/feature/powerloss.h',\n 'motion_cpp':root/'src/module/motion.cpp',\n\
+        \ 'tool_change_cpp':root/'src/module/tool_change.cpp',\n}\nassert files['settings_cpp'].is_file(), 'Cannot establish\
+        \ EEPROM readback: settings.cpp missing'\nassert files['lcd_rts'].is_file(), 'Cannot establish integrated DWIN source'\n\
+        assert files['configuration'].is_file(), 'Cannot establish configuration'\nchecks={}\nfor key,path in files.items():\n\
+        \ if not path.is_file():\n  checks[key]={'status':'MISSING','path':str(path)}\n  continue\n data=path.read_bytes()\n\
+        \ rel=path.relative_to(root)\n dst=report_dir/'integrated'/rel\n dst.parent.mkdir(parents=True,exist_ok=True)\n shutil.copy2(path,dst)\n\
+        \ checks[key]={'status':'EXPORTED','path':str(rel),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}\n\
+        dwin=files['lcd_rts'].read_text(errors='replace')\nassert 'SV04 DWIN: EEPROM init denied while printer active' in\
+        \ dwin, 'DWIN 323 init guard missing'\nassert 'SV04 DWIN: power-loss resume denied; verify home and idle' in dwin,\
+        \ 'DWIN 323 recovery guard missing'\nassert 'queue.enqueue_now_P(PSTR(\"M420 S1\"));' not in dwin, 'DWIN 325 auto-mesh\
+        \ activation returned'\nassert 'SV04 325:' in dwin, 'DWIN 325 marker missing'\npatterns={\n 'save':['settings.save(',\
+        \ 'M500', 'store_settings', 'save()'],\n 'read':['settings.load(', 'M501', 'load()', 'read_data(', 'read_data', 'EEPROM_READ',\
+        \ 'EEPROM_READ_START', 'persistentStore.read_data'],\n 'reset':['settings.reset(', 'settings.init_eeprom(', 'M502',\
+        \ 'reset()'],\n 'display':['RTS', 'queue.enqueue_now_P(', 'queue.inject(', 'M420 S1', 'axis_trusted'],\n 'powerloss':['recovery.resume(',\
+        \ 'recovery.save(', 'M413', 'POWER_LOSS_RECOVERY'],\n}\nfindings={}\nfor key,path in files.items():\n if not path.is_file():continue\n\
+        \ lines=path.read_text(errors='replace').splitlines()\n per={}\n for cat,needles in patterns.items():\n  matches=[{'line':n,'text':line.strip()[:200]}\
+        \ for n,line in enumerate(lines,1) if any(word in line for word in needles)]\n  if matches:per[cat]={'total':len(matches),'entries':matches[:180]}\n\
+        \ findings[key]=per\nres={\n 'scope':'SV04-NEXT C13+DWIN319+320+321+322+323+325 integrated sources',\n 'build_source':'Workflow32\
+        \ source reconstruction, stop before firmware build',\n 'flash_allowed':False,'hardware_tested':False,\n 'eeprom_post_reboot_hardware_readback_tested':False,\n\
+        \ 'dwin_hmi_image_library_verified':False,\n 'source_files':checks,'source_references':findings,\n 'limits':['Static\
+        \ source analysis cannot demonstrate values surviving reboot or physical power loss.',\n           'DWIN source is\
+        \ not a verified HMI resource library.',\n           'IDEX clearance and BLTouch behavior require machine measurements.'],\n\
+        }\n(report_dir/'EEPROM_DWIN_INTEGRATED_SOURCE_AUDIT.json').write_text(json.dumps(res,indent=2,ensure_ascii=False)+'\\\
+        n')\nwith (report_dir/'KURZBERICHT.txt').open('w') as out:\n out.write('SV04-NEXT / WORKFLOW 34 / INTEGRIERTE EEPROM-QUELLEN\\\
+        n')\n out.write('Quellbaum: C13+DWIN319+320+321+322+323+325\\n')\n for k,v in checks.items():out.write(f'{k}: {v[\"\
+        status\"]} {v.get(\"sha256\", \"\")}\\n')\n out.write('\\nDWIN Schutzmarker und Entfernung automatischer M420 S1:\
+        \ im integrierten Code nachgewiesen.\\n')\n out.write('EEPROM-Lade-/Speicherwege: Fundstellen im JSON; funktionale\
+        \ Ruecklesung nach Neustart NICHT nachgewiesen.\\n')\n out.write('DWIN-HMI, T0/T1-Abstaende und BLTouch-Hardware NICHT\
+        \ getestet.\\n')\n out.write('FLASH_ALLOWED=NO\\nHARDWARE_TESTED=NO\\n')\nprint('WORKFLOW34_INTEGRATED_SOURCES=EXPORTED')\n\
+        print('WORKFLOW34_EEPROM_READBACK_AUDIT=SOURCE_ONLY')\nprint('FLASH_ALLOWED=NO')\nprint('HARDWARE_TESTED=NO')\nPY34\n\
+        cp replay34.txt audit34/REPLAY_STEPS.txt\n"
+    - name: Upload verified integrated EEPROM source evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: SV04_NEXT_326_WORKFLOW34_EEPROM_DWIN_INTEGRIERTE_QUELLEN_NO_FLASH
+        path: audit34/
+        if-no-files-found: warn
