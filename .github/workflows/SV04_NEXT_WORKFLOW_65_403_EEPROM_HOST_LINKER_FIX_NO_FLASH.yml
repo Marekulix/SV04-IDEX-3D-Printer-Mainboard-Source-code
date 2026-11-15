@@ -1,0 +1,239 @@
+name: "SV04 403 W65 = fixed host linker flag + W64 verified STM32 builds + real 396 EEPROM full chain - NO FLASH"
+
+# EXTERNE ABHAENGIGKEIT (ins Repository-Stamm hochladen; Android-Name mit "(1)" ist erlaubt):
+#   SV04_CLAUDE_401_01_QUELLCODE_396*.zip   sha256 cd93ce867c7d92adce777e1db902f8e0fa4a2e09c74a0549fdc60f7f79082414
+# Alles andere (Testpaket t401, SHA-256 gebunden) ist in dieser Datei eingebettet. Kein OEM-Checkout noetig (396-Quellbaum ist vollstaendig).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eeprom_401:
+    name: "403: original 396 builds + host linker fix + EEPROM fullchain"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify external ZIP (resolved by prefix and SHA-256), unpack, verify source hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          want="cd93ce867c7d92adce777e1db902f8e0fa4a2e09c74a0549fdc60f7f79082414"; found=""
+          for f in SV04_CLAUDE_401_01_QUELLCODE_396*.zip; do
+            [ -f "$f" ] || continue
+            if [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$want" ]; then found="$f"; break; fi
+          done
+          if [ -z "$found" ]; then echo "FEHLT: SV04_CLAUDE_401_01_QUELLCODE_396*.zip mit sha256 $want im Repository-Stamm" >&2; ls -la >&2; exit 1; fi
+          echo "EXTERN_ZIP=$found" | tee evidence/extern_zip.txt
+          mkdir -p in396 && unzip -q -o "$found" -d in396
+          (cd in396 && unzip -q -o QUELLCODE_396_W58.zip -d s)
+          echo "3c8b5aa397c79da7a7130f463b2e2ed0af246b728de2968e8b4d5069fa82c4b7  in396/s/Marlin_396_integrated_source.tar.gz" | sha256sum -c - | tee evidence/tar_hash.txt
+          mkdir -p oem_c13 && tar -xzf in396/s/Marlin_396_integrated_source.tar.gz -C oem_c13
+          cat > evidence/key_hashes.expected <<'EOT'
+          9af81189acc75b6fe511ad9abd7e3ab35eb6967c8ab6184eac6f69c30c2e0505  oem_c13/Marlin/src/module/settings.cpp
+          1c9355051e55137165812c8ea189f3fc48e88891cb762a8ed9d41083dc058a30  oem_c13/Marlin/src/gcode/eeprom/M500-M504.cpp
+          0852f0e1823b97f812976315ce286ca05d12d4dda560315bde63bcc2fd558b4d  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          c727901c60730669212abce3aef6134959d0a31c8515c119d2d2220378e4c034  oem_c13/Marlin/src/module/sv04_claude_idex_guard.h
+          EOT
+          sed -i 's/^ *//' evidence/key_hashes.expected
+          sha256sum -c evidence/key_hashes.expected | tee evidence/key_hashes.txt
+      - name: Restore complete PlatformIO ini configuration omitted from W58 export
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/config_restore
+          test -f platformio.ini
+          test -d ini
+          test -f ini/stm32f1.ini
+          test -f oem_c13/platformio.ini
+          test -d oem_c13/buildroot
+          # The verified W58 source archive omits ini/* even though its
+          # platformio.ini references the directory. Use repository's
+          # checked-out Marlin ini directory, without modifying firmware source.
+          test ! -d oem_c13/ini || {
+            echo 'Existing ini directory detected; refusing silent overwrite' >&2
+            exit 1
+          }
+          cp -a ini oem_c13/ini
+          grep -Fq '[env:STM32F103RET6_creality]' oem_c13/ini/stm32f1.ini
+          sha256sum ini/stm32f1.ini oem_c13/ini/stm32f1.ini | tee evidence/config_restore/ini_sha256.txt
+          cmp ini/stm32f1.ini oem_c13/ini/stm32f1.ini
+          grep '^\s*extra_configs' oem_c13/platformio.ini | tee evidence/config_restore/extra_configs.txt
+          echo 'PLATFORMIO_INI_RESTORED=PASS FLASH_ALLOWED=NO' | tee evidence/config_restore/result.txt
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio
+          /tmp/sv04_pio/bin/pip install 'platformio==6.1.18' > evidence/pio_install.txt 2>&1
+          /tmp/sv04_pio/bin/pio --version | tee evidence/pio_version.txt
+      - name: Unpack embedded test package t401 (SHA-256 checked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' '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' | base64 -d > t401.tgz
+          echo "98377874992dc838168680ab7535524f72804d5e0eea6594c7ef622a06dcdb01  t401.tgz" | sha256sum -c - | tee evidence/t401_hash.txt
+          tar -xzf t401.tgz
+      - name: 378-380 native tests (DWIN X-jog IDEX guard, G90, pause-park relative mode) with mutants on the REAL 396 LCD_RTS.cpp (NO FLASH)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/t380
+          python3 -I t401/t380.py oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp oem_c13/Marlin/src/module/sv04_claude_idex_guard.h evidence/t380 2>&1 | tee evidence/t380/stdout.txt
+          [ "${PIPESTATUS[0]}" -eq 0 ] && grep -F "T380_RESULT PASS" evidence/t380/stdout.txt
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/build/$profile"
+            rm -rf oem_c13/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'; else export PLATFORMIO_BUILD_FLAGS=''; fi
+            /tmp/sv04_pio/bin/pio run -d oem_c13 -e STM32F103RET6_creality > "evidence/build/$profile/build.log" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/build/$profile/build.log"; then echo 'FAIL: exit 0 without SUCCESS marker' >> "evidence/build/$profile/build.log"; rc=42; fi
+            if [ "$rc" -eq 0 ]; then
+              mkdir -p "bin/$profile"
+              find oem_c13/.pio/build/STM32F103RET6_creality -maxdepth 1 -type f \( -name '*.bin' -o -name 'firmware.elf' \) -exec cp {} "bin/$profile/" \;
+              (cd "bin/$profile" && sha256sum * > SHA256SUMS.txt 2>/dev/null) || true
+              echo 'DEVELOPMENT ONLY. FLASH_ALLOWED=NO HARDWARE_TESTED=NO.' > "bin/$profile/NOT_APPROVED.txt"
+            fi
+            { echo "PROFILE=$profile"; echo "BUILD_EXIT=$rc"; echo FLASH_ALLOWED=NO; echo HARDWARE_TESTED=NO; } | tee "evidence/build/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/build/$profile/build.log" > "evidence/build/$profile/errors.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/build/$profile/build.log" > "evidence/build/$profile/ram_flash.txt" || true
+            tail -n 25 "evidence/build/$profile/build.log"
+            [ "$rc" -ne 0 ] && fail=1
+          done
+          exit "$fail"
+      - name: Export preprocessor extracts (.i/.macros) from the real build command lines
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          unset PLATFORMIO_BUILD_FLAGS
+          mkdir -p export/pre
+          /tmp/sv04_pio/bin/pio run -d oem_c13 -e STM32F103RET6_creality -t compiledb > export/pre/compiledb.log 2>&1
+          python3 - <<'PYX' > export/pre/LOG.txt 2>&1
+          import json, re, shlex, subprocess, os, glob
+          root = os.path.abspath('oem_c13'); outdir = os.path.abspath('export/pre')
+          db = glob.glob('oem_c13/compile_commands.json') + glob.glob('oem_c13/.pio/build/*/compile_commands.json')
+          print('compile_commands:', db)
+          want = ('settings.cpp', 'crc16.cpp', 'M500-M504.cpp', 'eeprom_flash.cpp', 'eeprom_wired.cpp', 'eeprom_bl24cxx.cpp')
+          if db:
+              for e in json.load(open(db[0])):
+                  d = e.get('directory') or root
+                  f = os.path.normpath(os.path.join(d, e['file']))
+                  if os.path.basename(f) not in want: continue
+                  a = shlex.split(e.get('command') or ' '.join(e['arguments'])); out = []; i = 0
+                  while i < len(a):
+                      if a[i] == '-o': i += 2; continue
+                      if a[i] == '-c': i += 1; continue
+                      out.append(a[i]); i += 1
+                  rel = os.path.relpath(f, root) if f.startswith(root) else f
+                  base = re.sub(r'[^A-Za-z0-9_.]+', '_', rel).strip('_')
+                  for flag, suf in (('-E', '.i'), ('-E -dM', '.macros')):
+                      r = subprocess.run(out + flag.split() + ['-o', os.path.join(outdir, base + suf)], capture_output=True, text=True, cwd=d)
+                      print(base, flag, 'rc=%d' % r.returncode, r.stderr[:300].replace('\n', ' '))
+          PYX
+          (cd export && find . -type f ! -name SHA256SUMS.txt | sort | xargs sha256sum > SHA256SUMS.txt)
+          cat export/pre/LOG.txt | head -20
+          for f in Marlin_src_module_settings.cpp Marlin_src_HAL_STM32_eeprom_bl24cxx.cpp Marlin_src_gcode_eeprom_M500_M504.cpp; do
+            test -s "export/pre/$f.i" || { echo "PREPROCESSOR_EXPORT_MISSING=$f.i" >&2; exit 1; }
+          done
+          test -s export/pre/Marlin_src_module_settings.cpp.macros
+          echo 'PREPROCESSOR_EXPORT=PASS' | tee evidence/config_restore/preprocessor_result.txt
+      - name: Host linker compatibility preflight (no firmware alteration)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/host_linker
+          if grep -F -- '--no-warn-rwx-segments' t401/fullchain.py; then
+            echo 'UNSUPPORTED_LINKER_FLAG_REMAINS' >&2; exit 1
+          fi
+          python3 - <<'PYHOST'
+          import pathlib, subprocess
+          p=pathlib.Path('evidence/host_linker')
+          source=p/'check.cpp'
+          source.write_text('asm(".globl _start\n_start:\n mov $1,%eax\n mov $0,%ebx\n int $0x80\n");\n')
+          cmd=['g++','-m32','-nostdlib','-static','-fno-pie','-no-pie','-Wl,-m,elf_i386','-o',str(p/'check'),str(source)]
+          r=subprocess.run(cmd,capture_output=True,text=True)
+          (p/'cmd.txt').write_text(' '.join(cmd)+'\n')
+          (p/'stderr.txt').write_text(r.stderr)
+          assert r.returncode==0,'HOST_LINKER_PREFLIGHT_FAILED'
+          print('HOST_LINKER_PREFLIGHT=PASS')
+          PYHOST
+      - name: EEPROM full chain 401 on the REAL 396 preprocessed tree (real sv04_eeprom_gcode_idle, 328B + 377 + 391-396, before/after, negative and mutation tests)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/eeprom401
+          rc=0
+          for f in Marlin_src_module_settings.cpp Marlin_src_HAL_STM32_eeprom_bl24cxx.cpp Marlin_src_gcode_eeprom_M500_M504.cpp; do test -s "export/pre/$f.i" || { echo "FEHLT export/pre/$f.i"; rc=1; }; done
+          for sym in EXTENSIBLE_UI EEPROM_AUTO_INIT IIC_BL24CXX_EEPROM; do
+            if grep -Eq "^#define $sym( |$)" export/pre/Marlin_src_module_settings.cpp.macros; then echo "$sym=DEFINIERT"; else echo "$sym=NICHT_DEFINIERT"; fi
+          done | tee evidence/eeprom401/flags.txt
+          if [ "$rc" -eq 0 ]; then
+            python3 -I t401/test_401.py export/pre evidence/eeprom401/lauf 2>&1 | tee evidence/eeprom401/stdout.txt
+            [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+            python3 -I t401/check_crc16.py export/pre/Marlin_src_libs_crc16.cpp.i evidence/eeprom401/crc16 2>&1 | tee evidence/eeprom401/crc16.txt
+            grep -F "CRC16_EQUIV faelle=8000 abweichungen=0" evidence/eeprom401/crc16.txt || rc=1
+          fi
+          echo "SV04_401_EEPROM_FULLCHAIN_RC=$rc FLASH_ALLOWED=NO HARDWARE_TESTED=NO" | tee evidence/eeprom401/result.txt
+          exit "$rc"
+      - name: Summary of what is PROVEN vs OPEN
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "SV04 401 / W63 summary (NO FLASH, HARDWARE_TESTED=NO)"
+            for p in integrated_backend integrated_failclosed; do echo "STM32 $p: $(grep BUILD_EXIT evidence/build/$p/result.txt 2>/dev/null || echo NICHT_AUSGEFUEHRT)"; done
+            echo "EEPROM full chain: $(cat evidence/eeprom401/result.txt 2>/dev/null || echo NICHT_AUSGEFUEHRT)"
+            echo "378-380 native: $(grep -h T380_RESULT evidence/t380/stdout.txt 2>/dev/null || echo NICHT_AUSGEFUEHRT)"
+            echo "DWIN-HMI-Projekt: OFFEN (nicht vorhanden). Hardware: OFFEN."
+          } | tee evidence/SUMMARY.txt
+      - name: Final result gate (both STM32 builds AND EEPROM full chain)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for profile in integrated_backend integrated_failclosed; do
+            grep -qx 'BUILD_EXIT=0' <(grep '^BUILD_EXIT=' "evidence/build/$profile/result.txt") || {
+              echo "STM32_BUILD_NOT_VERIFIED=$profile"; exit 1;
+            }
+          done
+          grep -Fq 'SV04_401_EEPROM_FULLCHAIN_RC=0 ' evidence/eeprom401/result.txt
+          grep -Fq 'T380_RESULT PASS' evidence/t380/stdout.txt
+          echo 'W65_SOFTWARE_VERIFICATION=PASS FLASH_ALLOWED=NO HARDWARE_TESTED=NO' | tee evidence/W65_VERDICT.txt
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_403_W65_EVIDENCE_NO_FLASH
+          path: |
+            evidence
+            export/pre/LOG.txt
+            export/pre/SHA256SUMS.txt
+          retention-days: 30
+      - name: Upload compiled firmware files (NOT approved for flashing)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_403_W65_BINARIES_NO_FLASH_APPROVAL
+          path: bin
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload preprocessor extracts (diagnostic)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_403_W65_PREPROCESSOR
+          path: export/pre
+          if-no-files-found: ignore
+          retention-days: 14
