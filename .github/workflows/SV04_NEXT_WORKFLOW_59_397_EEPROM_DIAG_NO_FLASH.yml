@@ -1,0 +1,88 @@
+name: "SV04 397 W59 EEPROM fullchain runner diagnostics - NO FLASH"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose_397:
+    name: "Inspect 328B and 377 runner None returns; keep release blocked"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+      - name: Download W58 preprocessed sources, read-only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p w58pre
+          gh run download 43733170214 -n SV04_396_EEPROM_SOURCE_EXPORT_DIAGNOSTIC -D w58pre
+          find w58pre -type f | sort | head -30
+      - name: Locate nested test runners and print return-path diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/397 extracted
+          python3 - <<'PY' | tee evidence/397/runner_diagnostic.txt
+          import ast, pathlib, zipfile, io
+          targets={'test_328b.py','test_377.py'}
+          found={}
+          def readzip(data,label,depth=0):
+              if depth>4: return
+              try: z=zipfile.ZipFile(io.BytesIO(data))
+              except (zipfile.BadZipFile, OSError): return
+              for obj in z.infolist():
+                  if obj.is_dir() or obj.file_size>25000000: continue
+                  name=pathlib.PurePosixPath(obj.filename).name
+                  if name in targets:
+                      found.setdefault(name,[]).append((label+'!'+obj.filename,z.read(obj)))
+                  if name.lower().endswith('.zip') and obj.file_size<25000000:
+                      readzip(z.read(obj),label+'!'+obj.filename,depth+1)
+          for p in pathlib.Path('.').glob('*.zip'):
+              if p.stat().st_size<=30000000:
+                  readzip(p.read_bytes(),str(p))
+          for name in sorted(targets):
+              print('\n===',name,'===')
+              hits=found.get(name,[])
+              if not hits:
+                  print('NOT_FOUND_IN_NESTED_ZIPS')
+                  continue
+              for label,data in hits:
+                  print('SOURCE',label,'BYTES',len(data))
+                  src=data.decode('utf-8',errors='replace')
+                  tree=ast.parse(src,filename=label)
+                  lines=src.splitlines()
+                  for node in ast.walk(tree):
+                      if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name=='run':
+                          print('RUN_START',node.lineno,'RUN_END',node.end_lineno)
+                          for i in range(node.lineno,node.end_lineno+1):
+                              print('%04d %s'%(i,lines[i-1]))
+                          print('RETURN_STATEMENTS',sum(isinstance(x,ast.Return) for x in ast.walk(node)))
+                  for i,line in enumerate(lines,1):
+                      if '.values()' in line or 'run(' in line:
+                          print('CALLSITE %04d %s'%(i,line))
+                  out=pathlib.Path('extracted')/name
+                  out.write_bytes(data)
+          print('\nFLASH_ALLOWED=NO HARDWARE_TESTED=NO')
+          PY
+      - name: Check diagnostic coverage without pretending a fullchain pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in test_328b.py test_377.py; do
+            if [ ! -s "extracted/$f" ]; then echo "MISSING_RUNNER: $f"; exit 2; fi
+          done
+          echo 'RUNNERS_INSPECTED=YES; EEPROM_FULLCHAIN_VERIFIED=NO; FLASH_ALLOWED=NO'
+      - name: Archive diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_397_W59_EEPROM_RUNNER_DIAGNOSTICS_NO_FLASH
+          path: evidence/397/
+          if-no-files-found: warn
