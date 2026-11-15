@@ -1,0 +1,1373 @@
+name: "SV04 345 W44 INTEGRATED DWIN329-336 + 328B2 EEPROM FULL CHAIN (test-selector fix for real .i) (real settings.cpp M500/M501/M503 executed natively, negative tests, 328B save() fix) on 328A - NO FLASH"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline_c12:
+    name: "Baseline build: NEW C12 copy (318 + C9 + C10 + C11 + C12), both profiles"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (resolved by prefix and SHA-256 - 318 hand-over, Claude C9, C10, C11, C12)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          mkdir -p evidence c318 c9pkg c10pkg c11pkg c12pkg
+          F318="$(resolve SV04_NEXT_318_GITHUB_UPLOAD_06 b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd)"
+          echo "F318=$F318" | tee -a evidence/input_names.txt
+          echo "b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  $F318" | sha256sum -c - | tee evidence/input_318_sha.txt
+          unzip -t "$F318" > evidence/zip_318_integrity.txt
+          unzip -q "$F318" -d c318
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "F9=$F9" | tee -a evidence/input_names.txt
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t "$F9" > evidence/zip_c9_integrity.txt
+          unzip -q "$F9" -d c9pkg
+          F10="$(resolve SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e)"
+          echo "F10=$F10" | tee -a evidence/input_names.txt
+          echo "b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  $F10" | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "$F10" > evidence/zip_c10_integrity.txt
+          unzip -q "$F10" -d c10pkg
+          F11="$(resolve SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e)"
+          echo "F11=$F11" | tee -a evidence/input_names.txt
+          echo "bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e  $F11" | sha256sum -c - | tee evidence/input_c11_sha.txt
+          unzip -t "$F11" > evidence/zip_c11_integrity.txt
+          unzip -q "$F11" -d c11pkg
+          F12="$(resolve SV04_NEXT_CLAUDE_C12_HOMEAXIS_FAN_STOP ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5)"
+          echo "F12=$F12" | tee -a evidence/input_names.txt
+          echo "ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5  $F12" | sha256sum -c - | tee evidence/input_c12_sha.txt
+          unzip -t "$F12" > evidence/zip_c12_integrity.txt
+          unzip -q "$F12" -d c12pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Apply C11 patch to a NEW copy of C10 (C9/C10 trees stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c10 oem_c11
+          python3 c11pkg/02_PATCHES/apply_c11.py oem_c11 2>&1 | tee evidence/apply_c11.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "MarlinCore.cpp: PATCHED" evidence/apply_c11.txt
+          diff -rq oem_c10 oem_c11 2>&1 | tee evidence/diff_c10_vs_c11.txt || true
+          test "$(diff -rq oem_c10 oem_c11 | wc -l)" -eq 3
+          grep -F "gcode/queue.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "control/M999.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c10_vs_c11.txt
+          sha256sum oem_c11/Marlin/src/gcode/queue.cpp oem_c11/Marlin/src/gcode/control/M999.cpp oem_c11/Marlin/src/MarlinCore.cpp | tee evidence/source_hashes_c11.txt
+      - name: Run Claude C11 host tests and C10 regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c11pkg/03_TESTS && python3 -B test_c11.py) 2>&1 | tee evidence/c11_host_tests.txt
+          grep -qx 'OK' evidence/c11_host_tests.txt
+          (cd c11pkg/03_TESTS && python3 -B test_c11_homeaxis_anker.py) 2>&1 | tee evidence/c11_homeaxis_anker.txt
+          grep -qx 'OK' evidence/c11_homeaxis_anker.txt
+          (cd c11pkg/03_TESTS/regression_c10/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_regression_in_c11.txt
+          grep -qx 'OK' evidence/c10_regression_in_c11.txt
+      - name: Apply C12 patch to a NEW copy of C11 (C11 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c11 oem_c12
+          python3 c12pkg/02_PATCHES/apply_c12.py oem_c12 2>&1 | tee evidence/apply_c12.txt
+          grep -F "sv04_claude_stopgate.h: PATCHED" evidence/apply_c12.txt
+          diff -rq oem_c11 oem_c12 2>&1 | tee evidence/diff_c11_vs_c12.txt || true
+          test "$(diff -rq oem_c11 oem_c12 | wc -l)" -eq 1
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c11_vs_c12.txt
+          sha256sum oem_c12/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hash_c12_stopgate.txt
+          grep -F "7ead4e640f70f1c9796d5cb3085f7f758a40ab63ce127fc1c4623d09cef9f29c" evidence/source_hash_c12_stopgate.txt
+      - name: Run Claude C12 host tests (fan gate, real homeaxis harness; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c12pkg/03_TESTS && python3 -B test_c12_fan.py) 2>&1 | tee evidence/c12_fan_tests.txt
+          grep -qx 'OK' evidence/c12_fan_tests.txt
+          (cd c12pkg/03_TESTS && python3 -B test_c12_homeaxis.py) 2>&1 | tee evidence/c12_homeaxis_tests.txt
+          grep -qx 'OK' evidence/c12_homeaxis_tests.txt
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c12_base/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c12/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c12 -e STM32F103RET6_creality > "evidence/c12_base/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c12_base/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c12_base/$profile/build.log"
+              build_rc=42
+            fi
+            {
+              echo "BUILD_TREE=oem_c12"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C12_ON_C11_ON_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c12_base/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c12_base/$profile/build.log" > "evidence/c12_base/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c12_base/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_345_BASELINE_C12_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  c13_changes:
+    name: "Integrated build: NEW copy (C12 + C13 + DWIN319+320+321+322), host tests, both profiles, firmware export"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify inputs (resolved by prefix and SHA-256 - 318 hand-over, Claude C9, C10, C11, C12, C13)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          mkdir -p evidence c318 c9pkg c10pkg c11pkg c12pkg c13pkg
+          F318="$(resolve SV04_NEXT_318_GITHUB_UPLOAD_06 b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd)"
+          echo "F318=$F318" | tee -a evidence/input_names.txt
+          echo "b474d80ac3d67a8f5f4f81d8a9c0e7fa1d24996c738b2e6b7001aefce15a18dd  $F318" | sha256sum -c - | tee evidence/input_318_sha.txt
+          unzip -t "$F318" > evidence/zip_318_integrity.txt
+          unzip -q "$F318" -d c318
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "F9=$F9" | tee -a evidence/input_names.txt
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c - | tee evidence/input_c9_sha.txt
+          unzip -t "$F9" > evidence/zip_c9_integrity.txt
+          unzip -q "$F9" -d c9pkg
+          F10="$(resolve SV04_NEXT_CLAUDE_C10_STOPP_GATE_QUEUE b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e)"
+          echo "F10=$F10" | tee -a evidence/input_names.txt
+          echo "b422e97e45bec791fe0a60c0d9bf7b27eec2432e01c9b32bcec492ae05638c6e  $F10" | sha256sum -c - | tee evidence/input_c10_sha.txt
+          unzip -t "$F10" > evidence/zip_c10_integrity.txt
+          unzip -q "$F10" -d c10pkg
+          F11="$(resolve SV04_NEXT_CLAUDE_C11_SD_HOMEAXIS_FAN_SAFETY bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e)"
+          echo "F11=$F11" | tee -a evidence/input_names.txt
+          echo "bfb495f94ee837864c92ad56dd46fb1532cbc5f5da3804a49045ca5ff0d1ce2e  $F11" | sha256sum -c - | tee evidence/input_c11_sha.txt
+          unzip -t "$F11" > evidence/zip_c11_integrity.txt
+          unzip -q "$F11" -d c11pkg
+          F12="$(resolve SV04_NEXT_CLAUDE_C12_HOMEAXIS_FAN_STOP ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5)"
+          echo "F12=$F12" | tee -a evidence/input_names.txt
+          echo "ab2209676008532b4985fa20063a1115724bb09aeaab9cd378078341d214cbf5  $F12" | sha256sum -c - | tee evidence/input_c12_sha.txt
+          unzip -t "$F12" > evidence/zip_c12_integrity.txt
+          unzip -q "$F12" -d c12pkg
+          F13="$(resolve SV04_NEXT_CLAUDE_C13_IDEX_G28_SAFETY 79c81a07b09a298faed58f16f6681116ec615ba3134230966231cb35282b758e)"
+          echo "F13=$F13" | tee -a evidence/input_names.txt
+          echo "79c81a07b09a298faed58f16f6681116ec615ba3134230966231cb35282b758e  $F13" | sha256sum -c - | tee evidence/input_c13_sha.txt
+          unzip -t "$F13" > evidence/zip_c13_integrity.txt
+          unzip -q "$F13" -d c13pkg
+          (cd c318 && python3 - <<'PYV'
+          import json, hashlib, pathlib
+          m = json.load(open('SHA256_MANIFEST_318.json')); items = m if isinstance(m, list) else m.get('files', m)
+          if isinstance(items, dict): items = [{'path': k, 'sha256': v if isinstance(v, str) else v.get('sha256')} for k, v in items.items()]
+          bad = [i for i in items if pathlib.Path(i.get('path') or i.get('file')).is_file() and hashlib.sha256(pathlib.Path(i.get('path') or i.get('file')).read_bytes()).hexdigest() != i.get('sha256')]
+          print('MANIFEST_318 geprueft', len(items), 'abweichend', len(bad)); assert not bad
+          PYV
+          ) | tee evidence/manifest_318.txt
+
+      - name: Checkout pinned OEM firmware (not user GitHub branch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/Sovol3d/SV04-IDEX-3D-Printer-Mainboard-Source-code.git oem
+          git -C oem checkout -q --detach 1867fcba75354a5c65e0631d6972dd19f1bd6cbe
+          test "$(git -C oem rev-parse HEAD)" = '1867fcba75354a5c65e0631d6972dd19f1bd6cbe'
+          git -C oem rev-parse HEAD | tee evidence/oem_pin.txt
+      - name: Reproduce 309 from the recorded combined_308.patch (ROUTE B - without the 287 package; a DIFFERENT route than the original 309 build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'caaa7ccf7d9263fa74b383f726428c3fc463e825b27617b999dd68cfc7c251cc  c318/combined_308.patch' | sha256sum -c - | tee evidence/combined_308_sha.txt
+          test -z "$(git -C oem status --porcelain)"
+          git -C oem apply --check --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem apply --whitespace=nowarn ../c318/combined_308.patch
+          git -C oem status --porcelain | tee evidence/route_b_status.txt
+          test "$(git -C oem status --porcelain | wc -l)" -eq 15
+          sha256sum -c - <<'ROUTE_B_PINS' | tee evidence/route_b_309_pins.txt
+          4f1698bc3b16052d9855b0504ef7728c41bc127a0da551fc77efcb6c8f58c93d  oem/Marlin/src/module/tool_change.cpp
+          54ff1c0c034f76b1c795e747cbc0fad525c259c6ce6ffd0e8c7fd4c90062ec96  oem/Marlin/src/module/motion.cpp
+          c1b44b74784eaaa45da8c13d1765a2094a3823c45912fc7200e3873924c1de24  oem/Marlin/src/gcode/bedlevel/abl/G29.cpp
+          faf2d034a067ccecea5e0d413028e9598935fe577486748a6a5493bc16c6a097  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h
+          379848c3a0e3cd2f2a67e4f560b0a02592b6d95bd414818d8d4fc8ad0f04a2a3  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_eeprom_core.h
+          d616c3e94826ffaac50e5e43fa842a53f17a091ff24537433edc8ce1c8afa250  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_g29_session.h
+          a6ea813001b6a81547c17834811aba68bc6022a526e19145643be2bfe445b16d  oem/Marlin/src/feature/sv04_claude_auto60/sv04_claude_toolchange_policy.h
+          b417b83080615d869ffd3b5115a057b10d4ce50187cfc12de3e8649888cad06d  oem/Marlin/src/gcode/control/sv04_claude_toolchange_guard.h
+          03543e739c3fe75d668f57202441597a3a5050b62ffaa25c2f8ca45573db4f1f  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc
+          7ca925326ca62b286c529c2ef2f722cb0899b6319c1f47aece5fb2f9d0b484aa  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_hooks.h
+          f7cf74f644d473927e13478d2f851d24c9b77f29c7c7f9b628f48809186a3b0b  oem/Marlin/src/lcd/e3v2/creality/sv04_claude_oem_mesh_loop.inc
+          ROUTE_B_PINS
+      - name: Install PlatformIO 6.1.18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/sv04_pio_309
+          /tmp/sv04_pio_309/bin/pip install 'platformio==6.1.18' > evidence/pio_install_308.txt 2>&1
+          /tmp/sv04_pio_309/bin/pio --version | tee evidence/pio_version.txt
+      - name: Apply 318 installer to a NEW copy through the STRICT wrapper (309 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/source_hashes_309_before_318.txt
+          python3 c9pkg/02_PATCHES/integrate_318_strict.py c318 oem oem318 2>&1 | tee evidence/integrate_318_strict.txt
+          grep -F 'STRICT_PRECHECK=OK' evidence/integrate_318_strict.txt
+          grep -F '318 SOURCE OVERLAY APPLIED' evidence/integrate_318_strict.txt
+          diff -rq oem oem318 2>&1 | grep -v '^Only in .*\.git' | tee evidence/diff_309_vs_318.txt || true
+          for f in Marlin/src/module/tool_change.cpp Marlin/src/module/motion.cpp Marlin/src/gcode/bedlevel/abl/G29.cpp Marlin/src/feature/sv04_claude_auto60/sv04_claude_auto60_core.h Marlin/src/lcd/e3v2/creality/sv04_claude_auto60_marlin.inc Marlin/src/feature/sv04_claude_auto60/sv04_claude_zhome_policy.h; do sha256sum "oem318/$f"; done | tee evidence/source_hashes_318.txt
+          # the unmodified 309 tree must be byte-identical after the installer ran
+          sha256sum oem/Marlin/src/module/tool_change.cpp oem/Marlin/src/module/motion.cpp oem/Marlin/src/gcode/bedlevel/abl/G29.cpp | diff - evidence/source_hashes_309_before_318.txt
+      - name: Apply C9 patch to a NEW copy of 318 (318 stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem318 oem_c9
+          python3 c9pkg/02_PATCHES/apply_m999_reset_c9.py oem_c9 2>&1 | tee evidence/apply_m999_reset_c9.txt
+          grep -F "M999_C9=PATCHED" evidence/apply_m999_reset_c9.txt
+          diff -rq oem318 oem_c9 2>&1 | tee evidence/diff_318_vs_c9.txt || true
+          test "$(diff -rq oem318 oem_c9 | wc -l)" -eq 1
+          grep -F "M999.cpp" evidence/diff_318_vs_c9.txt
+          echo "f778002d1a491dc58ee4d8c550120f24db477ec185d3f7124acc457968659cb9  oem318/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem318_m999_unchanged.txt
+          sha256sum oem_c9/Marlin/src/gcode/control/M999.cpp | tee evidence/source_hash_c9_m999.txt
+      - name: Apply C10 patch to a NEW copy of C9 (318 and C9 stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c9 oem_c10
+          python3 c10pkg/02_PATCHES/apply_c10.py oem_c10 2>&1 | tee evidence/apply_c10.txt
+          grep -F "gcode.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c10.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c10.txt
+          diff -rq oem_c9 oem_c10 2>&1 | tee evidence/diff_c9_vs_c10.txt || true
+          test "$(diff -rq oem_c9 oem_c10 | wc -l)" -eq 4
+          grep -F "gcode/gcode.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "gcode/queue.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "control/M999.cpp" evidence/diff_c9_vs_c10.txt
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c9_vs_c10.txt
+          echo "cbaca8b8bca033002a39ceb0eff7a7a64799a2c99e7d1f83cb5ea6a203418654  oem_c9/Marlin/src/gcode/control/M999.cpp" | sha256sum -c - | tee evidence/oem_c9_m999_unchanged.txt
+          sha256sum oem_c10/Marlin/src/gcode/gcode.cpp oem_c10/Marlin/src/gcode/queue.cpp oem_c10/Marlin/src/gcode/control/M999.cpp oem_c10/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hashes_c10.txt
+      - name: Apply C11 patch to a NEW copy of C10 (C9/C10 trees stay untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c10 oem_c11
+          python3 c11pkg/02_PATCHES/apply_c11.py oem_c11 2>&1 | tee evidence/apply_c11.txt
+          grep -F "queue.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "M999.cpp: PATCHED" evidence/apply_c11.txt
+          grep -F "MarlinCore.cpp: PATCHED" evidence/apply_c11.txt
+          diff -rq oem_c10 oem_c11 2>&1 | tee evidence/diff_c10_vs_c11.txt || true
+          test "$(diff -rq oem_c10 oem_c11 | wc -l)" -eq 3
+          grep -F "gcode/queue.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "control/M999.cpp" evidence/diff_c10_vs_c11.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c10_vs_c11.txt
+          sha256sum oem_c11/Marlin/src/gcode/queue.cpp oem_c11/Marlin/src/gcode/control/M999.cpp oem_c11/Marlin/src/MarlinCore.cpp | tee evidence/source_hashes_c11.txt
+      - name: Run Claude C11 host tests and C10 regression (no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c11pkg/03_TESTS && python3 -B test_c11.py) 2>&1 | tee evidence/c11_host_tests.txt
+          grep -qx 'OK' evidence/c11_host_tests.txt
+          (cd c11pkg/03_TESTS && python3 -B test_c11_homeaxis_anker.py) 2>&1 | tee evidence/c11_homeaxis_anker.txt
+          grep -qx 'OK' evidence/c11_homeaxis_anker.txt
+          (cd c11pkg/03_TESTS/regression_c10/03_TESTS && python3 -B test_c10.py) 2>&1 | tee evidence/c10_regression_in_c11.txt
+          grep -qx 'OK' evidence/c10_regression_in_c11.txt
+      - name: Apply C12 patch to a NEW copy of C11 (C11 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c11 oem_c12
+          python3 c12pkg/02_PATCHES/apply_c12.py oem_c12 2>&1 | tee evidence/apply_c12.txt
+          grep -F "sv04_claude_stopgate.h: PATCHED" evidence/apply_c12.txt
+          diff -rq oem_c11 oem_c12 2>&1 | tee evidence/diff_c11_vs_c12.txt || true
+          test "$(diff -rq oem_c11 oem_c12 | wc -l)" -eq 1
+          grep -F "sv04_claude_stopgate.h" evidence/diff_c11_vs_c12.txt
+          sha256sum oem_c12/Marlin/src/gcode/sv04_claude_stopgate.h | tee evidence/source_hash_c12_stopgate.txt
+          grep -F "7ead4e640f70f1c9796d5cb3085f7f758a40ab63ce127fc1c4623d09cef9f29c" evidence/source_hash_c12_stopgate.txt
+      - name: Run Claude C12 host tests (fan gate, real homeaxis harness; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c12pkg/03_TESTS && python3 -B test_c12_fan.py) 2>&1 | tee evidence/c12_fan_tests.txt
+          grep -qx 'OK' evidence/c12_fan_tests.txt
+          (cd c12pkg/03_TESTS && python3 -B test_c12_homeaxis.py) 2>&1 | tee evidence/c12_homeaxis_tests.txt
+          grep -qx 'OK' evidence/c12_homeaxis_tests.txt
+      - name: Apply C13 patch to a NEW copy of C12 (C12 tree stays untouched, fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a oem_c12 oem_c13
+          python3 c13pkg/02_PATCHES/apply_c13.py oem_c13 2>&1 | tee evidence/apply_c13.txt
+          test "$(grep -c ': PATCHED' evidence/apply_c13.txt)" -eq 3
+          grep -F "sv04_claude_idex_guard.h: CREATED" evidence/apply_c13.txt
+          diff -rq oem_c12 oem_c13 2>&1 | tee evidence/diff_c12_vs_c13.txt || true
+          test "$(diff -rq oem_c12 oem_c13 | wc -l)" -eq 4
+          grep -F "Configuration.h" evidence/diff_c12_vs_c13.txt
+          grep -F "module/motion.cpp" evidence/diff_c12_vs_c13.txt
+          grep -F "src/MarlinCore.cpp" evidence/diff_c12_vs_c13.txt
+          grep -F "sv04_claude_idex_guard.h" evidence/diff_c12_vs_c13.txt
+          sha256sum oem_c13/Marlin/Configuration.h oem_c13/Marlin/src/module/motion.cpp oem_c13/Marlin/src/MarlinCore.cpp oem_c13/Marlin/src/module/sv04_claude_idex_guard.h | tee evidence/source_hashes_c13.txt
+          grep -F "9480fcfc1e5abf1670b33e982762685d88cd351461bea0e45f169e610b0fe681" evidence/source_hashes_c13.txt
+          grep -E '^#define NO_MOTION_BEFORE_HOMING' oem_c13/Marlin/Configuration.h | tee evidence/no_motion_define.txt
+      - name: Run Claude C13 host tests (installer, idex guard, no-motion gate, kill fans, mutants; no network, no hardware)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd c13pkg/03_TESTS && python3 -B test_c13.py) 2>&1 | tee evidence/c13_host_tests.txt
+          grep -qx 'OK' evidence/c13_host_tests.txt
+      - name: Integrate DWIN 319 into C13 copy (strict hash and validated patch, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYDWIN'
+          import pathlib, hashlib, base64
+          src=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='0d8ef04dac43935d917d77a7c0efd269361b924b26270ccee85fadba9171a94c'
+          actual=hashlib.sha256(src.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit('DWIN 318 source SHA256 mismatch: ' + actual)
+          encoded='LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC05Nyw2ICs5Nyw4IEBACiBib29sIHNkX3ByaW50aW5nX2F1dG9wYXVzZTsKIGlubGluZSB2b2lkIFJUU19saW5lX3RvX2N1cnJlbnQoQXhpc0VudW0gYXhpcykKIHsKKyAgLy8gRGVmZW5zZS1pbi1kZXB0aDogRFdJTiBtYW51YWwgbW92ZXMgYnlwYXNzIHRoZSBHLWNvZGUgc3RvcCBnYXRlLgorICBpZiAoSXNTdG9wcGVkKCkpIHJldHVybjsKICAgaWYgKCFwbGFubmVyLmlzX2Z1bGwoKSkKICAgewogICAgIHBsYW5uZXIuYnVmZmVyX2xpbmUoY3VycmVudF9wb3NpdGlvbiwgTU1NX1RPX01NUyhtYW51YWxfZmVlZHJhdGVfbW1fbVsoaW50OF90KWF4aXNdKSwgYWN0aXZlX2V4dHJ1ZGVyKTsKQEAgLTc0OSw2ICs3NTEsMjIgQEAKICAgICByZXR1cm47CiAgIH0KIAorICAvLyBEZWZlbnNlLWluLWRlcHRoIGZvciBkaXJlY3QgTENEIGNhbGxzLiBVbmxpa2UgcXVldWVkIEctY29kZSwgTENECisgIC8vIGhhbmRsZXJzIGNhbiBtb3ZlIHN0ZXBwZXJzLCByZXN1bWUgU0QsIGFuZCBzZXQgaGVhdGVycyBkaXJlY3RseS4KKyAgLy8gV2hpbGUgc3RvcHBlZCwgYWxsb3cgT05MWSBleHBsaWNpdCBwcmludGVyIHN0b3AgYW5kIGNvb2xpbmcgYWN0aW9ucy4KKyAgLy8gVGVtcFNjcmVlbktleSAweEYxIGlzIHRoZSBkb2N1bWVudGVkIGhlYXRlci1vZmYvY29vbGluZyBvcGVyYXRpb24uCisgIC8vIE5vIG90aGVyIGtleSBtYXkgcmVhY2ggaXRzIHVuZGVybHlpbmcgaGFuZGxlciB1bnRpbCBNOTk5IGFuZCByZS1ob21pbmcuCisgIGlmIChJc1N0b3BwZWQoKQorICAgICAgJiYgQ2hlY2trZXkgIT0gU3RvcFByaW50S2V5CisgICAgICAmJiBDaGVja2tleSAhPSBDb29sU2NyZWVuS2V5CisgICAgICAmJiAhKENoZWNra2V5ID09IFRlbXBTY3JlZW5LZXkgJiYgcmVjZGF0LmRhdGFbMF0gPT0gMHhGMSkpIHsKKyAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFNUT1AgLSBhY3Rpb24gZGVuaWVkOyBNOTk5IGFuZCBob21lIHJlcXVpcmVkIik7CisgICAgbWVtc2V0KCZyZWNkYXQsIDAsIHNpemVvZihyZWNkYXQpKTsKKyAgICByZWNkYXQuaGVhZFswXSA9IEZIT05FOworICAgIHJlY2RhdC5oZWFkWzFdID0gRkhUV087CisgICAgcmV0dXJuOworICB9CisKICAgc3dpdGNoKENoZWNra2V5KQogICB7CiAgICAgY2FzZSBNYWluUGFnZUtleToKQEAgLTI2MzcsNyArMjY1NSwxNCBAQAogICAgICAgcnRzY2hlY2suUlRTX1NuZERhdGEodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0uY2Vsc2l1cywgSEVBRDFfQ1VSUkVOVF9URU1QX1ZQKTsKICAgICAgIHJ0c2NoZWNrLlJUU19TbmREYXRhKHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLmNlbHNpdXMsIEJFRF9DVVJSRU5UX1RFTVBfVlApOwogCi0gICAgICBpZigobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMF0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMV0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVfYmVkICE9IHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLnRhcmdldCkpCisgICAgICAvLyBBIHN0b3BwZWQgcHJpbnRlciBtdXN0IG5ldmVyIHJlY2VpdmUgYSBzdGFsZSBwb3NpdGl2ZSB0YXJnZXQgZnJvbQorICAgICAgLy8gRFdJTidzIHBlcmlvZGljIHRhcmdldCByZS1zeW5jaHJvbml6YXRpb24gcGF0aC4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSkgeworICAgICAgICB0aGVybWFsTWFuYWdlci5zZXRUYXJnZXRIb3RlbmQoMCwgMCk7CisgICAgICAgIHRoZXJtYWxNYW5hZ2VyLnNldFRhcmdldEhvdGVuZCgwLCAxKTsKKyAgICAgICAgdGhlcm1hbE1hbmFnZXIuc2V0VGFyZ2V0QmVkKDApOworICAgICAgfQorICAgICAgZWxzZSBpZigobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMF0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVbMV0gIT0gdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0KSB8fCAobGFzdF90YXJnZXRfdGVtcGVyYXR1cmVfYmVkICE9IHRoZXJtYWxNYW5hZ2VyLnRlbXBfYmVkLnRhcmdldCkpCiAgICAgICB7CiAgICAgICAgIHRoZXJtYWxNYW5hZ2VyLnNldFRhcmdldEhvdGVuZCh0aGVybWFsTWFuYWdlci50ZW1wX2hvdGVuZFswXS50YXJnZXQsIDApOwogICAgICAgICB0aGVybWFsTWFuYWdlci5zZXRUYXJnZXRIb3RlbmQodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMV0udGFyZ2V0LCAxKTsK'
+          data=base64.b64decode(''.join(encoded.split()),validate=True)
+          patch=pathlib.Path('dwin319_27.patch')
+          patch.write_bytes(data)
+          assert hashlib.sha256(data).hexdigest() == 'af8eff98113d7537c1dbd601c70738bc17b186b4b3daea1e3777a0f7a4e0391a'
+          print('DWIN_INPUT_HASH=OK')
+          PYDWIN
+          git -C oem_c13 apply --check ../dwin319_27.patch
+          git -C oem_c13 apply ../dwin319_27.patch
+          echo '911c0ef756288e43ab48fa7e578148d3f599bf674907d54fff46b670b1bc73fd  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin319_hash.txt
+          git -C oem_c13 diff -- Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp > evidence/dwin319_c13_diff.patch
+          test -s evidence/dwin319_c13_diff.patch
+          echo 'DWIN319_INTEGRATED_ON_C13=YES' | tee evidence/dwin319_status.txt
+
+      - name: Apply DWIN320 manual move and G28 safeguards (only after verified DWIN319)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY320'
+          import base64,hashlib,pathlib
+          path=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='911c0ef756288e43ab48fa7e578148d3f599bf674907d54fff46b670b1bc73fd'
+          assert hashlib.sha256(path.read_bytes()).hexdigest()==expected,'unexpected DWIN319 source, refusing patch'
+          patch=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0xNTAxLDkgKzE1MDEsMTAgQEAKICAgICAgICAgfQogICAgICAgICBlbHNlCiAgICAgICAgIHsKLSAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBaMCIpKTsKLSAgICAgICAgfQotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcxIEYyMDAgWjAuMCIpKTsKKyAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBaIikpOworICAgICAgICB9CisgICAgICAgIC8vIERvIG5vdCBxdWV1ZSBhIFogbW92ZSBhaGVhZCBvZiB0aGUgaG9taW5nIHJlc3VsdDogZmFpbGVkIEcyOCBtdXN0CisgICAgICAgIC8vIG5ldmVyIGJlIGZvbGxvd2VkIGJ5IGFuIGF1dG9tYXRpY2FsbHkgcXVldWVkIG1vdGlvbiBjb21tYW5kLgogICAgICAgfQogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gMikKICAgICAgIHsKQEAgLTE2MzAsNiArMTYzMSwxMyBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFhheGlzbW92ZUtleToKKyAgICAgIC8vIERXSU4gd3JpdGVzIGN1cnJlbnRfcG9zaXRpb24gYmVmb3JlIGNhbGxpbmcgUlRTX2xpbmVfdG9fY3VycmVudC4KKyAgICAgIC8vIFJlamVjdCB1bnJlZmVyZW5jZWQgbW92ZXMgKmJlZm9yZSogbXV0YXRpbmcgcG9zaXRpb25hbCBzdGF0ZS4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogbWFudWFsIFhZWiBtb3ZlIGRlbmllZDsgaG9tZSBhbGwgYXhlcyBmaXJzdCIpOworICAgICAgICBicmVhazsKKyAgICAgIH0KICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICB3YWl0d2F5ID0gNDsKQEAgLTE3MDAsNiArMTcwOCwxMyBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFlheGlzbW92ZUtleToKKyAgICAgIC8vIERXSU4gd3JpdGVzIGN1cnJlbnRfcG9zaXRpb24gYmVmb3JlIGNhbGxpbmcgUlRTX2xpbmVfdG9fY3VycmVudC4KKyAgICAgIC8vIFJlamVjdCB1bnJlZmVyZW5jZWQgbW92ZXMgKmJlZm9yZSogbXV0YXRpbmcgcG9zaXRpb25hbCBzdGF0ZS4KKyAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogbWFudWFsIFhZWiBtb3ZlIGRlbmllZDsgaG9tZSBhbGwgYXhlcyBmaXJzdCIpOworICAgICAgICBicmVhazsKKyAgICAgIH0KICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICBmbG9hdCB5X21pbiwgeV9tYXg7CkBAIC0xNzIzLDYgKzE3MzgsMTMgQEAKICAgICAgIGJyZWFrOwogICAgIAogICAgIGNhc2UgWmF4aXNtb3ZlS2V5OgorICAgICAgLy8gRFdJTiB3cml0ZXMgY3VycmVudF9wb3NpdGlvbiBiZWZvcmUgY2FsbGluZyBSVFNfbGluZV90b19jdXJyZW50LgorICAgICAgLy8gUmVqZWN0IHVucmVmZXJlbmNlZCBtb3ZlcyAqYmVmb3JlKiBtdXRhdGluZyBwb3NpdGlvbmFsIHN0YXRlLgorICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQorICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBtYW51YWwgWFlaIG1vdmUgZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgIHsKICAgICAgICAgZmxvYXQgel9taW4sIHpfbWF4OwpAQCAtMTgwNSw2ICsxODI3LDExIEBACiAgICAgICBicmVhazsKIAogICAgIGNhc2UgRmlsYW1lbnRMb2FkS2V5OgorICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQorICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBmaWxhbWVudCBtb3Rpb24gZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYocmVjZGF0LmRhdGFbMF0gPT0gMSkKICAgICAgIHsKICAgICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkK')
+          pathlib.Path('dwin320.patch').write_bytes(patch)
+          print('DWIN320_INPUT=VERIFIED')
+          PY320
+          git -C oem_c13 apply --check ../dwin320.patch
+          git -C oem_c13 apply ../dwin320.patch
+          echo "ee22c1c99d10bd50b035d6550aff688a770c0fc224a921a59c109f0e1dadb040  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp" | sha256sum -c - | tee evidence/dwin320_hash.txt
+          grep -F 'SV04 DWIN: manual XYZ move denied' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          grep -F 'G28 Z' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          if grep -Fq 'G28 Z0' oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp; then exit 1; fi
+          echo 'DWIN320_INTEGRATED_ON_C13=YES' | tee evidence/dwin320_status.txt
+
+
+      - name: Apply DWIN321 audit security fixes after verified DWIN320
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'ee22c1c99d10bd50b035d6550aff688a770c0fc224a921a59c109f0e1dadb040  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin321_base_hash.txt
+          python3 - <<'PY321'
+          import base64, hashlib, pathlib
+          contents=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0xMzQ5LDggKzEzNDksOCBAQAogICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IGZhbHNlOwogICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZm9udCA9IGFjdGl2ZV9leHRydWRlcjsKICAgICAgICAgVXBkYXRlX1RpbWVfVmFsdWUgPSAwOworICAgICAgICAvLyBHMjggcmVzdWx0IG11c3QgYmUgY2hlY2tlZCBiZWZvcmUgYW55IGxhdGVyIFogbW92ZW1lbnQuCiAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzI4IikpOwotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcxIEYyMDAgWjAuMCIpKTsKICAgICAgICAgUlRTX1NuZERhdGEoRXhjaGFuZ2VQYWdlQmFzZSArIDMyLCBFeGNoYW5nZXBhZ2VBZGRyKTsKIAogICAgICAgICBpZiAoYWN0aXZlX2V4dHJ1ZGVyID09IDApCkBAIC0xNTA4LDYgKzE1MDgsMTAgQEAKICAgICAgIH0KICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDIpCiAgICAgICB7CisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFogYmFieXN0ZXAgZGVuaWVkOyBob21lIFogZmlyc3QiKTsKKyAgICAgICAgICBicmVhazsKKyAgICAgICAgfQogICAgICAgICBsYXN0X3pvZmZzZXQgPSB6cHJvYmVfem9mZnNldDsKICAgICAgICAgaWYgKFdJVEhJTigoenByb2JlX3pvZmZzZXQgKyAwLjA1KSwgWl9QUk9CRV9PRkZTRVRfUkFOR0VfTUlOLCBaX1BST0JFX09GRlNFVF9SQU5HRV9NQVgpKQogICAgICAgICB7CkBAIC0xNTIyLDYgKzE1MjYsMTAgQEAKICAgICAgIH0KICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDMpCiAgICAgICB7CisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKKyAgICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IFogYmFieXN0ZXAgZGVuaWVkOyBob21lIFogZmlyc3QiKTsKKyAgICAgICAgICBicmVhazsKKyAgICAgICAgfQogICAgICAgICBsYXN0X3pvZmZzZXQgPSB6cHJvYmVfem9mZnNldDsKICAgICAgICAgaWYgKFdJVEhJTigoenByb2JlX3pvZmZzZXQgLSAwLjA1KSwgWl9QUk9CRV9PRkZTRVRfUkFOR0VfTUlOLCBaX1BST0JFX09GRlNFVF9SQU5HRV9NQVgpKQogICAgICAgICB7CkBAIC0xNTYxLDcgKzE1NjksOSBAQAogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID09IDYpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgIENlbnRyZSAxCi0gICAgICAgIGlmKCFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTU3Myw3ICsxNTgzLDkgQEAKICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDcpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgRnJvbnQgTGVmdCAyCi0gICAgICAgIGlmKCFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTU4NSw3ICsxNTk3LDkgQEAKICAgICAgIGVsc2UgaWYgKHJlY2RhdC5kYXRhWzBdID09IDgpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgRnJvbnQgUmlnaHQgMwotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE1OTcsNyArMTYxMSw5IEBACiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA5KQogICAgICAgewogICAgICAgICAvLyBBc3NpdGFudCBMZXZlbCAsIEJhY2sgUmlnaHQgNAotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MDksNyArMTYyNSw5IEBACiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxMCkKICAgICAgIHsKICAgICAgICAgLy8gQXNzaXRhbnQgTGV2ZWwgLCBCYWNrIExlZnQgNQotICAgICAgICBpZighcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgeyAgIAogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MjIsOCArMTY0MCw5IEBACiAgICAgICB7IAogICAgICAgICB3YWl0d2F5ID0gMzsKICAgICAgICAgUlRTX1NuZERhdGEoRXhjaGFuZ2VQYWdlQmFzZSArIDQwLCBFeGNoYW5nZXBhZ2VBZGRyKTsKKyAgICAgICAgLy8gTmV2ZXIgcXVldWUgRzM0IGltbWVkaWF0ZWx5IGFmdGVyIGhvbWluZzogZmFpbGVkIEcyOCBYIG11c3QKKyAgICAgICAgLy8gbm90IGxlYXZlIGEgcG90ZW50aWFsbHkgdW5zYWZlIGNhbGlicmF0aW9uIG1vdmUgaW4gdGhlIHF1ZXVlLgogICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBYIikpOwotICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkczNCIpKTsKICAgICAgICAgVXBkYXRlX1RpbWVfVmFsdWUgPSAwOwogICAgICAgICB3YWl0d2F5ID0gMDsKICAgICAgIH0KQEAgLTI2NjUsNyArMjY4NCwxNCBAQAogICAgICAgICB9CiAgICAgICB9CiAKLSAgICAgIGlmKHBhdXNlX2FjdGlvbl9mbGFnICYmIChmYWxzZSA9PSBzZGNhcmRfcGF1c2VfY2hlY2spICYmIHByaW50aW5nSXNQYXVzZWQoKSAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgLy8gUGF1c2UgYXV0b21hdGlvbiBpcyBvdXRzaWRlIHRoZSBrZXkgZGlzcGF0Y2hlcjsgdGhlIHN0b3AgZ2F0ZSBhdAorICAgICAgLy8gUlRTX1JlY0RhdGEgYWxvbmUgY2Fubm90IHByb3RlY3QgdGhpcyBkaXJlY3QgcXVldWVkIG1vdGlvbiBwYXRoLgorICAgICAgaWYgKElzU3RvcHBlZCgpKSBwYXVzZV9hY3Rpb25fZmxhZyA9IGZhbHNlOworICAgICAgaWYgKHBhdXNlX2FjdGlvbl9mbGFnICYmICFJc1N0b3BwZWQoKQorICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpCisgICAgICAgICAgJiYgVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICAmJiAoZmFsc2UgPT0gc2RjYXJkX3BhdXNlX2NoZWNrKSAmJiBwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQogICAgICAgewogICAgICAgICBwYXVzZV9hY3Rpb25fZmxhZyA9IGZhbHNlOwogICAgICAgICBpZigoMSA9PSBhY3RpdmVfZXh0cnVkZXIpICYmICgxID09IHNhdmVfZHVhbF94X2NhcnJpYWdlX21vZGUpKQo=')
+          assert hashlib.sha256(contents).hexdigest() == '4fe00a4546169c138accd9914551daa3d8cad42b3b5fe9a454f9fe735422e8ed'
+          pathlib.Path('dwin321.patch').write_bytes(contents)
+          PY321
+          git -C oem_c13 apply --check ../dwin321.patch
+          git -C oem_c13 apply ../dwin321.patch
+          echo '96765b74b3051683ec5351550d0c5f8ee14c4d7690b4a2c66d49db3072b6c7c9  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin321_new_hash.txt
+          python3 - <<'PY321T'
+          import pathlib,re
+          s=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          assert 'queue.enqueue_now_P(PSTR("G1 F200 Z0.0"))' not in s
+          assert 'queue.enqueue_now_P(PSTR("G34"))' not in s
+          assert s.count('&& TEST(axis_trusted, Z_AXIS)') >= 6
+          assert 'if (IsStopped()) pause_action_flag = false;' in s
+          assert s.count('SV04 DWIN: Z babystep denied; home Z first') == 2
+          print('DWIN321_STATIC_CHECKS=PASS')
+          PY321T
+          echo 'DWIN321_INTEGRATED_ON_C13=YES' | tee evidence/dwin321_status.txt
+
+      - name: DWIN322 - verify 321 source, close toolchange/EEPROM paths, and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '96765b74b3051683ec5351550d0c5f8ee14c4d7690b4a2c66d49db3072b6c7c9  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin322_base_sha.txt
+          python3 - <<'PY322'
+          import base64,hashlib,pathlib
+          payload=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC05OCw3ICs5OCw4IEBACiBpbmxpbmUgdm9pZCBSVFNfbGluZV90b19jdXJyZW50KEF4aXNFbnVtIGF4aXMpCiB7CiAgIC8vIERlZmVuc2UtaW4tZGVwdGg6IERXSU4gbWFudWFsIG1vdmVzIGJ5cGFzcyB0aGUgRy1jb2RlIHN0b3AgZ2F0ZS4KLSAgaWYgKElzU3RvcHBlZCgpKSByZXR1cm47CisgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHJldHVybjsKICAgaWYgKCFwbGFubmVyLmlzX2Z1bGwoKSkKICAgewogICAgIHBsYW5uZXIuYnVmZmVyX2xpbmUoY3VycmVudF9wb3NpdGlvbiwgTU1NX1RPX01NUyhtYW51YWxfZmVlZHJhdGVfbW1fbVsoaW50OF90KWF4aXNdKSwgYWN0aXZlX2V4dHJ1ZGVyKTsKQEAgLTE3ODYsMTMgKzE3ODcsMTkgQEAKICAgICAgIH0KICAgICAgIGJyZWFrOwogICAgIGNhc2UgU2VsZWN0RXh0cnVkZXJLZXk6CisgICAgICAvLyBOZXZlciBjaGFpbiBHMjggWCBhbmQgVDAvVDE6IHRoZSBxdWV1ZWQgVCBjb21tYW5kIHdvdWxkIHN1cnZpdmUKKyAgICAgIC8vIGFuIHVuc3VjY2Vzc2Z1bCBob21pbmcgc2VxdWVuY2UuIFJlcXVpcmUgY29tcGxldGVkIFhZWiBob21pbmcgZmlyc3QuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKSkgeworICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IHRvb2xjaGFuZ2UgZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYocmVjZGF0LmRhdGFbMF0gPT0gMSkKICAgICAgIHsKICAgICAgICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewogICAgICAgICAgIGlmKGFjdGl2ZV9leHRydWRlciA9PSAwKQogICAgICAgICAgIHsKLSAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzI4IFgiKSk7CiAgICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIlQxIikpOwogICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyID0gMTsKICAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlcl9mbGFnID0gdHJ1ZTsKQEAgLTE4MDMsNyArMTgxMCw2IEBACiAgICAgICAgICAgfQogICAgICAgICAgIGVsc2UgaWYoYWN0aXZlX2V4dHJ1ZGVyID09IDEpCiAgICAgICAgICAgewotICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMjggWCIpKTsKICAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDAiKSk7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAwOwogICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZsYWcgPSBmYWxzZTsKQEAgLTE4MjEsNyArMTgyNyw2IEBACiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgaWYoYWN0aXZlX2V4dHJ1ZGVyID09IDApCiAgICAgICAgICAgewotICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMjggWCIpKTsKICAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDEiKSk7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IHRydWU7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAxOwpAQCAtMTgzMSw3ICsxODM2LDYgQEAKICAgICAgICAgICB9CiAgICAgICAgICAgZWxzZSBpZihhY3RpdmVfZXh0cnVkZXIgPT0gMSkKICAgICAgICAgICB7Ci0gICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCBYIikpOwogICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJUMCIpKTsKICAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlcl9mbGFnID0gZmFsc2U7CiAgICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAwOwpAQCAtMjMzOSw3ICsyMzQzLDEzIEBACiAgICAgICB9CiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA2KQogICAgICAgewotICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgIWNhcmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpIHsKKyAgICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIH0KKyAgICAgICAgZWxzZSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBFRVBST00gc2F2ZSBkZW5pZWQgd2hpbGUgcHJpbnRlciBhY3RpdmUiKTsKKyAgICAgICAgfQogICAgICAgICBydHNjaGVjay5SVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMSwgRXhjaGFuZ2VwYWdlQWRkcik7CiAgICAgICB9CiAgICAgICBicmVhazsKQEAgLTI0MzIsNyArMjQ0MiwxMyBAQAogICAgIGNhc2UgU2F2ZUVFUFJPTToKICAgICAgIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxKQogICAgICAgewotICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgIWNhcmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpIHsKKyAgICAgICAgICBzZXR0aW5ncy5zYXZlKCk7CisgICAgICAgIH0KKyAgICAgICAgZWxzZSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBFRVBST00gc2F2ZSBkZW5pZWQgd2hpbGUgcHJpbnRlciBhY3RpdmUiKTsKKyAgICAgICAgfQogICAgICAgfQogICAgIGJyZWFrOwogICAgIGNhc2UgQ2hhbmdlUGFnZUtleToK')
+          assert hashlib.sha256(payload).hexdigest() == '36fec36140d72a430741d379f671dc87bab995a6a1f510984d4787ed031bc165'
+          pathlib.Path('dwin322.patch').write_bytes(payload)
+          print('DWIN322_PATCH_HASH=OK')
+          PY322
+          git -C oem_c13 apply --check ../dwin322.patch
+          git -C oem_c13 apply ../dwin322.patch
+          echo 'ae9e354e3b2f714bb90c7540589a0d4b44bbffee3fa8de79f0d9a5443dc833c5  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp' | sha256sum -c - | tee evidence/dwin322_output_sha.txt
+          python3 - <<'PY322TEST'
+          import pathlib,re,hashlib
+          s=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          block=s.split('    case SelectExtruderKey:',1)[1].split('    case FilamentLoadKey:',1)[0]
+          assert 'queue.enqueue_now_P(PSTR("G28 X"));' not in block
+          assert block.count('queue.enqueue_now_P(PSTR("T1"));')==2
+          assert block.count('queue.enqueue_now_P(PSTR("T0"));')==2
+          assert 'SV04 DWIN: toolchange denied; home all axes first' in block
+          assert 'if (IsStopped() || !TEST(axis_trusted, X_AXIS)' in block
+          assert s.count('SV04 DWIN: EEPROM save denied while printer active')==2
+          assert s.count('!card.isPrinting() && !printingIsPaused()')==2
+          assert s.count('settings.save();')==6 # including 4 commented sites
+          assert 'if (IsStopped() || !TEST(axis_trusted, X_AXIS)' in s.split('inline void RTS_line_to_current',1)[1].split('RTSSHOW::RTSSHOW',1)[0]
+          print('DWIN322_SOURCE_TESTS=PASS')
+          PY322TEST
+          echo 'DWIN322_INTEGRATED_ON_C13=YES' | tee evidence/dwin322_status.txt
+
+      - name: Apply verified DWIN323 safety patch on DWIN322 (NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY323'
+          import pathlib, hashlib, base64
+          p=pathlib.Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='ae9e354e3b2f714bb90c7540589a0d4b44bbffee3fa8de79f0d9a5443dc833c5'
+          assert hashlib.sha256(p.read_bytes()).hexdigest() == expected, 'Unexpected DWIN322 source; refuse patch'
+          payload=base64.b64decode('LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC0yMDU1LDYgKzIwNTUsMTUgQEAKICAgICBjYXNlIFBvd2VyQ29udGludWVQcmludEtleToKICAgICAgIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxKQogICAgICAgeworICAgICAgICAvLyBTVjA0IDMyMzogTmV2ZXIgc3RhcnQgcG93ZXItbG9zcyByZXBsYXkgd2l0aCB1bnRydXN0ZWQgYXhlcy4KKyAgICAgICAgLy8gVGhlIG9wZXJhdG9yIG11c3QgZXhwbGljaXRseSBlc3RhYmxpc2ggYSBzYWZlIG1hY2hpbmUgc3RhdGUgZmlyc3QuCisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICAgIHx8IGNhcmQuaXNQcmludGluZygpIHx8IHByaW50aW5nSXNQYXVzZWQoKQorICAgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBwb3dlci1sb3NzIHJlc3VtZSBkZW5pZWQ7IHZlcmlmeSBob21lIGFuZCBpZGxlIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0KICAgICAgICAgI2lmIEVOQUJMRUQoRFVBTF9YX0NBUlJJQUdFKQogICAgICAgICAgIHNhdmVfZHVhbF94X2NhcnJpYWdlX21vZGUgPSBkdWFsWFByaW50aW5nTW9kZVN0YXR1czsKICAgICAgICAgICBzd2l0Y2goc2F2ZV9kdWFsX3hfY2FycmlhZ2VfbW9kZSkKQEAgLTIzNTcsNiArMjM2NiwxMiBAQAogICAgIGNhc2UgU3RvcmVNZW1vcnlLZXk6CiAgICAgICBpZihyZWNkYXQuZGF0YVswXSA9PSAweEYxKQogICAgICAgeworICAgICAgICAvLyBTVjA0IDMyMzogUmVpbml0aWFsaXphdGlvbiBtdXRhdGVzIHBlcnNpc3RlbnQgc2V0dGluZ3MsIG5vdCBhIHJlYWQuCisgICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCBjYXJkLmlzUHJpbnRpbmcoKSB8fCBwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgIHx8IHBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkgeworICAgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogRUVQUk9NIGluaXQgZGVuaWVkIHdoaWxlIHByaW50ZXIgYWN0aXZlIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0KICAgICAgICAgc2V0dGluZ3MuaW5pdF9lZXByb20oKTsKICAgICAgICAgI2lmIEVOQUJMRUQoQVVUT19CRURfTEVWRUxJTkdfQklMSU5FQVIpCiAgICAgICAgICAgYm9vbCB6aWcgPSBmYWxzZTsKQEAgLTIzOTcsNiArMjQxMiwxMSBAQAogICAgICAgfQogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gMHhGMCkKICAgICAgIHsKKyAgICAgICAgaWYgKElzU3RvcHBlZCgpIHx8IGNhcmQuaXNQcmludGluZygpIHx8IHByaW50aW5nSXNQYXVzZWQoKQorICAgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBvZmZzZXQgYXBwbHkgZGVuaWVkIHdoaWxlIGFjdGl2ZSIpOworICAgICAgICAgIGJyZWFrOworICAgICAgICB9CiAgICAgICAgIG1lbXNldChjb21tYW5kYnVmLCAwLCBzaXplb2YoY29tbWFuZGJ1ZikpOwogICAgICAgICBzcHJpbnRmX1AoY29tbWFuZGJ1ZiwgUFNUUigiTTIxOCBUMSBYJTQuMWYiKSwgaG90ZW5kX29mZnNldFsxXS54KTsKICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChjb21tYW5kYnVmKTsKQEAgLTI0MTAsNiArMjQzMCwxMiBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFhob3RlbmRPZmZzZXRLZXk6CisgICAgICAvLyBTVjA0IDMyMzogT2Zmc2V0IGVkaXRzIGNoYW5nZSBJREVYIGdlb21ldHJ5LiBPbmx5IHdoZW4gc2FmZWx5IGlkbGUuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgY2FyZC5pc1ByaW50aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogSURFWCBvZmZzZXQgZWRpdCBkZW5pZWQgd2hpbGUgYWN0aXZlIik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID49IDMyNzY4KQogICAgICAgewogICAgICAgICBob3RlbmRfb2Zmc2V0WzFdLnggPSAocmVjZGF0LmRhdGFbMF0gLSA2NTUzNikgLyAxMDAuMDsKQEAgLTI0MjUsNiArMjQ1MSwxMiBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIFlob3RlbmRPZmZzZXRLZXk6CisgICAgICAvLyBTVjA0IDMyMzogT2Zmc2V0IGVkaXRzIGNoYW5nZSBJREVYIGdlb21ldHJ5LiBPbmx5IHdoZW4gc2FmZWx5IGlkbGUuCisgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgY2FyZC5pc1ByaW50aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAgICAgfHwgcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKSB7CisgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogSURFWCBvZmZzZXQgZWRpdCBkZW5pZWQgd2hpbGUgYWN0aXZlIik7CisgICAgICAgIGJyZWFrOworICAgICAgfQogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID49IDMyNzY4KQogICAgICAgewogICAgICAgICBob3RlbmRfb2Zmc2V0WzFdLnkgPSAocmVjZGF0LmRhdGFbMF0gLSA2NTUzNikgLyAxMDAuMDsK')
+          pathlib.Path('dwin323.patch').write_bytes(payload)
+          print('DWIN323_BASE_HASH=OK')
+          PY323
+          git -C oem_c13 apply --check ../dwin323.patch
+          git -C oem_c13 apply ../dwin323.patch
+          echo "7cc50482d5f805887429d0de2b029d69557290e0ecd674cad9abbe9210f425cf  oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp" | sha256sum -c - | tee evidence/dwin323_hash.txt
+          python3 - <<'PY323TEST'
+          from pathlib import Path
+          s=Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          assert 'SV04 DWIN: EEPROM init denied while printer active' in s
+          assert 'SV04 DWIN: power-loss resume denied; verify home and idle' in s
+          assert s.count('SV04 DWIN: IDEX offset edit denied while active')==2
+          assert 'SV04 DWIN: offset apply denied while active' in s
+          assert s.count('SV04 DWIN: EEPROM save denied while printer active')==2
+          print('DWIN323_SOURCE_TESTS=PASS')
+          PY323TEST
+          echo 'DWIN323_INTEGRATED_ON_C13=YES' | tee evidence/dwin323_status.txt
+
+
+      - name: Apply DWIN325 fail-closed mesh activation patch (strict SHA256, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY325'
+          from pathlib import Path
+          import hashlib
+          p=Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp')
+          expected='7cc50482d5f805887429d0de2b029d69557290e0ecd674cad9abbe9210f425cf'
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==expected, 'DWIN323 source mismatch; refuse patch'
+          s=p.read_text()
+          needle='queue.enqueue_now_P(PSTR("M420 S1"));'
+          assert s.count(needle)==3, 'unexpected M420 S1 call count'
+          s=s.replace(needle, '// SV04 325: Do not enable leveling without a verified, machine-specific mesh.\n    // Activate deliberately with M420 S1 only after mesh validation.')
+          p.write_text(s)
+          assert s.count(needle)==0
+          assert 'SV04 DWIN: EEPROM init denied while printer active' in s
+          assert 'SV04 DWIN: power-loss resume denied; verify home and idle' in s
+          print('DWIN325_SOURCE_CHECKS=PASS')
+          print('DWIN325_SHA256='+hashlib.sha256(p.read_bytes()).hexdigest())
+          PY325
+          echo 'DWIN325_INTEGRATED_ON_C13=YES' | tee evidence/dwin325_status.txt
+
+      - name: Apply 328A settings.cpp patch on the DWIN325 tree and run its host tests (strict hashes, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          F328=""
+          for f in SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS*.zip; do
+            if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "313b095bb25c18ba57fb4866f202bd3630ce59f20801a72cbbe9124cbc7a94fd" ]; then F328="$f"; break; fi
+          done
+          test -n "$F328" || { echo "FEHLT: SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS*.zip mit sha256 313b095bb25c18ba57fb4866f202bd3630ce59f20801a72cbbe9124cbc7a94fd im Repository-Stamm" >&2; ls -la >&2; exit 1; }
+          echo "F328=$F328" | tee -a evidence/input_names.txt
+          unzip -t "$F328" > evidence/zip_328a_integrity.txt
+          unzip -q "$F328" -d c328pkg
+          P=c328pkg/SV04_NEXT_CLAUDE_328A_EEPROM_FELDER_SETTINGS
+          sha256sum oem_c13/Marlin/src/module/settings.cpp | tee evidence/settings_before_328a.txt
+          grep -F "e62c86fe73b7583486f412662c9db0f740b5dceea50734aa4c4eb02718303338" evidence/settings_before_328a.txt
+          python3 -I $P/02_PATCH/apply_328.py oem_c13/Marlin 2>&1 | tee evidence/apply_328a.txt
+          grep -F "bb5043f4d6df93df6c1d030fc677ffa5478ba59d04a9fd3d548769610ab9bd66" evidence/apply_328a.txt
+          cmp oem_c13/Marlin/src/module/settings.cpp $P/01_QUELLEN/geaendert/Marlin/src/module/settings.cpp
+          (cd $P/03_TESTS && python3 -I test_328.py) 2>&1 | tee evidence/c328a_host_tests.txt
+          grep -F "0 FAIL" evidence/c328a_host_tests.txt
+          # Belege fuer die Annahmen der Hosttests (echte Makrodefinitionen im Baum)
+          grep -rnE "define +(EEPROM_START|EEPROM_READ|EEPROM_READ_ALWAYS|EEPROM_WRITE|EEPROM_SKIP|EEPROM_FINISH)\b" oem_c13/Marlin/src > evidence/eeprom_macros_real.txt || true
+          grep -rnE "define +(SERIAL_ERROR_MSG|SERIAL_ERROR_START|SERIAL_ECHOLNPGM)\b" oem_c13/Marlin/src > evidence/serial_macros_real.txt || true
+          cat evidence/eeprom_macros_real.txt evidence/serial_macros_real.txt | head -40
+
+      - name: Unpack embedded 328B test package (SHA-256 checked) and apply 328B save() patch on the 328A tree (strict hashes, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' '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' | base64 -d > t328b.tgz
+          echo "c5ac9e9f7b033bf25f2a11eca8153b1e35e87ef784a3e213d0eb12badcc97b80  t328b.tgz" | sha256sum -c - | tee evidence/t328b_pkg_hash.txt
+          tar -xzf t328b.tgz
+          sha256sum oem_c13/Marlin/src/module/settings.cpp | tee evidence/settings_before_328b.txt
+          grep -F "bb5043f4d6df93df6c1d030fc677ffa5478ba59d04a9fd3d548769610ab9bd66" evidence/settings_before_328b.txt
+          cp oem_c13/Marlin/src/module/settings.cpp evidence/settings_328a_copy.cpp
+          python3 -I t328b/apply_328b.py oem_c13/Marlin/src/module/settings.cpp 2>&1 | tee evidence/apply_328b.txt
+          grep -F "b4478678b1e38a2a4fbf183d9d1ca6b0b8583843fe690347f2f7c25d643a3fbc" evidence/apply_328b.txt
+          diff -u evidence/settings_328a_copy.cpp oem_c13/Marlin/src/module/settings.cpp > evidence/settings_328a_to_328b.diff || true
+          cat evidence/settings_328a_to_328b.diff
+
+      - name: DWIN337 semantic integration of 329 + offline 330-336 on verified DWIN325 (NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/dwin337
+          SOURCE=oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp
+          echo '46e8fde743ceb33e9d0ddbd3d2221ef9bb1ffb05a98ea91466f369efd8edab02  '"$SOURCE" | sha256sum -c -
+          cat > evidence/dwin337/patch.b64 <<'B64_337'
+          LS0tIGEvTWFybGluL3NyYy9sY2QvZTN2Mi9jcmVhbGl0eS9MQ0RfUlRTLmNwcAorKysgYi9NYXJsaW4vc3JjL2xjZC9lM3YyL2NyZWFsaXR5L0xDRF9SVFMuY3BwCkBAIC05NSwxMSArOTUsMTggQEAKIGJvb2wg
+          Y2FyZF9pbnNlcnRfc3Q7CiBib29sIHNkX3ByaW50aW5nOwogYm9vbCBzZF9wcmludGluZ19hdXRvcGF1c2U7CisvLyBTVjA0IDMzMzogcXVldWVkIEctY29kZSBtYXkgZXhpc3Qgd2hpbGUgdGhlIHN0ZXBwZXIg
+          cGxhbm5lciBpcyBpZGxlLgorLy8gTmV2ZXIgbGV0IGRpcmVjdCBEV0lOIG1vdmVtZW50IG92ZXJ0YWtlIGEgcGVuZGluZyBob21pbmcgLyB0b29sIC8gbGV2ZWxpbmcgY29tbWFuZC4KK3N0YXRpYyBpbmxpbmUg
+          Ym9vbCBzdjA0X2R3aW5fbW90aW9uX2lkbGUoKSB7CisgIHJldHVybiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpICYmICFxdWV1ZS5oYXNfY29tbWFuZHNfcXVldWVkKCk7Cit9CisKIGlubGluZSB2b2lk
+          IFJUU19saW5lX3RvX2N1cnJlbnQoQXhpc0VudW0gYXhpcykKIHsKICAgLy8gRGVmZW5zZS1pbi1kZXB0aDogRFdJTiBtYW51YWwgbW92ZXMgYnlwYXNzIHRoZSBHLWNvZGUgc3RvcCBnYXRlLgogICBpZiAoSXNT
+          dG9wcGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCi0gICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSByZXR1cm47Cisg
+          ICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICB8fCAhc3YwNF9kd2luX21vdGlvbl9pZGxlKCkpIHJldHVybjsKICAgaWYgKCFw
+          bGFubmVyLmlzX2Z1bGwoKSkKICAgewogICAgIHBsYW5uZXIuYnVmZmVyX2xpbmUoY3VycmVudF9wb3NpdGlvbiwgTU1NX1RPX01NUyhtYW51YWxfZmVlZHJhdGVfbW1fbVsoaW50OF90KWF4aXNdKSwgYWN0aXZl
+          X2V4dHJ1ZGVyKTsKQEAgLTM0MSw4ICszNDgsNyBAQAogICAgICAgICBzaG93Y291bnQrKzsKICAgICAgIH0KICAgICB9Ci0gICAgLy8gU1YwNCAzMjU6IERvIG5vdCBlbmFibGUgbGV2ZWxpbmcgd2l0aG91dCBh
+          IHZlcmlmaWVkLCBtYWNoaW5lLXNwZWNpZmljIG1lc2guCi0gICAgLy8gQWN0aXZhdGUgZGVsaWJlcmF0ZWx5IHdpdGggTTQyMCBTMSBvbmx5IGFmdGVyIG1lc2ggdmFsaWRhdGlvbi4KKyAgICAvLyBTVjA0IDMz
+          MCBvZmZsaW5lOiBuZXZlciBhdXRvLWVuYWJsZSBhbiB1bnZlcmlmaWVkIG1lc2ggKE00MjAgUzEgcmVtb3ZlZCkuCiAgICNlbmRpZgogICBsYXN0X3pvZmZzZXQgPSB6cHJvYmVfem9mZnNldCA9IHByb2JlLm9m
+          ZnNldC56OwogICBSVFNfU25kRGF0YShwcm9iZS5vZmZzZXQueiAqIDEwMCwgQVVUT19CRURfTEVWRUxfWk9GRlNFVF9WUCk7CkBAIC03NjAsNyArNzY2LDggQEAKICAgLy8gTm8gb3RoZXIga2V5IG1heSByZWFj
+          aCBpdHMgdW5kZXJseWluZyBoYW5kbGVyIHVudGlsIE05OTkgYW5kIHJlLWhvbWluZy4KICAgaWYgKElzU3RvcHBlZCgpCiAgICAgICAmJiBDaGVja2tleSAhPSBTdG9wUHJpbnRLZXkKLSAgICAgICYmIENoZWNr
+          a2V5ICE9IENvb2xTY3JlZW5LZXkKKyAgICAgICYmICEoQ2hlY2trZXkgPT0gQ29vbFNjcmVlbktleQorICAgICAgICAgICAmJiAocmVjZGF0LmRhdGFbMF0gPT0gMSB8fCByZWNkYXQuZGF0YVswXSA9PSAyIHx8
+          IHJlY2RhdC5kYXRhWzBdID09IDMpKQogICAgICAgJiYgIShDaGVja2tleSA9PSBUZW1wU2NyZWVuS2V5ICYmIHJlY2RhdC5kYXRhWzBdID09IDB4RjEpKSB7CiAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBE
+          V0lOOiBTVE9QIC0gYWN0aW9uIGRlbmllZDsgTTk5OSBhbmQgaG9tZSByZXF1aXJlZCIpOwogICAgIG1lbXNldCgmcmVjZGF0LCAwLCBzaXplb2YocmVjZGF0KSk7CkBAIC0xNDY3LDggKzE0NzQsNyBAQAogICAg
+          ICAgICAgICNlbHNlCiAgICAgICAgICAgICBSVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMjEsIEV4Y2hhbmdlcGFnZUFkZHIpOwogICAgICAgICAgICNlbmRpZgotICAgICAgICAgIC8vIFNWMDQgMzI1
+          OiBEbyBub3QgZW5hYmxlIGxldmVsaW5nIHdpdGhvdXQgYSB2ZXJpZmllZCwgbWFjaGluZS1zcGVjaWZpYyBtZXNoLgotICAgIC8vIEFjdGl2YXRlIGRlbGliZXJhdGVseSB3aXRoIE00MjAgUzEgb25seSBhZnRl
+          ciBtZXNoIHZhbGlkYXRpb24uCisgICAgICAgICAgLy8gU1YwNCAzMzAgb2ZmbGluZTogbmV2ZXIgYXV0by1lbmFibGUgYW4gdW52ZXJpZmllZCBtZXNoIChNNDIwIFMxIHJlbW92ZWQpLgogICAgICAgICB9CiAg
+          ICAgICB9CiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSAzKQpAQCAtMTQ5MSwxNCArMTQ5NywyMyBAQAogICAgIGNhc2UgQmVkTGV2ZWxGdW5LZXk6CiAgICAgICBpZiAocmVjZGF0LmRhdGFbMF0g
+          PT0gMSkKICAgICAgIHsKLSAgICAgICAgIAorICAgICAgICAvLyBTVjA0IDMzMTogcmVqZWN0IGxldmVsLWhvbWUgcmVxdWVzdCBkdXJpbmcgYW4gYWN0aXZlIHByaW50IG9yIG1vdmUKKyAgICAgICAgLy8gYmVm
+          b3JlIG11dGF0aW5nIERXSU4gc3RhdGUgb3IgYWN0aXZlX2V4dHJ1ZGVyLgorICAgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgY2FyZC5pc1ByaW50aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAg
+          ICAgICB8fCAhc3YwNF9kd2luX21vdGlvbl9pZGxlKCkpIHsKKyAgICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46IGxldmVsIGhvbWluZyBkZW5pZWQgd2hpbGUgYnVzeSIpOworICAgICAgICAg
+          IGJyZWFrOworICAgICAgICB9CisgICAgICAgIC8vIFNWMDQgMzMzOiBuZXZlciBwcmV0ZW5kIFQwIHdhcyBzZWxlY3RlZCBiZWZvcmUgTWFybGluIGNvbXBsZXRlZCBUMC4KKyAgICAgICAgLy8gV2hlbiBUMSBp
+          cyBhY3RpdmUsIHJlcXVpcmUgYW4gZXhwbGljaXQgY29tcGxldGVkIFQwIHNlbGVjdGlvbiBmaXJzdC4KKyAgICAgICAgaWYgKGFjdGl2ZV9leHRydWRlciAhPSAwKSB7CisgICAgICAgICAgU0VSSUFMX0VDSE9M
+          TlBHTSgiU1YwNCBEV0lOOiBsZXZlbCBob21pbmcgZGVuaWVkOyBjb21wbGV0ZSBUMCBzZWxlY3Rpb24gZmlyc3QiKTsKKyAgICAgICAgICBicmVhazsKKyAgICAgICAgfQogICAgICAgICB3YWl0d2F5ID0gNjsK
+          LSAgICAgICAgaWYoKGFjdGl2ZV9leHRydWRlciA9PSAxKSB8fCAoIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpKSB8fCAoIVRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpKSkKKyAgICAgICAgaWYoKCFURVNU
+          KGF4aXNfdHJ1c3RlZCwgWF9BWElTKSkgfHwgKCFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSkpCiAgICAgICAgIHsKICAgICAgICAgICBBdXRvSG9tZUljb25OdW0gPSAwOwotICAgICAgICAgIGFjdGl2ZV9l
+          eHRydWRlciA9IDA7Ci0gICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZsYWcgPSBmYWxzZTsKLSAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZm9udCA9IGFjdGl2ZV9leHRydWRlcjsKICAgICAgICAgICBxdWV1
+          ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOCIpKTsKICAgICAgICAgICBSVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMzIsIEV4Y2hhbmdlcGFnZUFkZHIpOwogICAgICAgICB9CkBAIC0xNTU3LDI0ICsx
+          NTcyLDQxIEBACiAgICAgICAgIHsKICAgICAgICAgICBSVFNfU25kRGF0YSgxLCBFWENIQU5HRV9OT1paTEVfSUNPTl9WUCk7CiAgICAgICAgIH0KLSAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJN
+          NDIwIFMwIikpOworICAgICAgICAvLyBTVjA0IDMzNDogT3BlbmluZyB0aGUgbGV2ZWxpbmcgcGFnZSBpcyBkaXNwbGF5IG5hdmlnYXRpb24gb25seS4KKyAgICAgICAgLy8gTmV2ZXIgc2lsZW50bHkgZGlzYWJs
+          ZSB0aGUgY3VycmVudGx5IGFjdGl2ZSBtZXNoIHdpdGggTTQyMCBTMC4KKyAgICAgICAgLy8gRzI5IGNvbnRyb2xzIGxldmVsaW5nIHN0YXRlIHRocm91Z2ggdGhlIGZpcm13YXJlIHNlc3Npb24gZ3VhcmQuCiAg
+          ICAgICB9CiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA1KQogICAgICAgewogICAgICAgICAjaWYgRU5BQkxFRChCTFRPVUNIKQorICAgICAgICAgIC8vIFNWMDQgMzMwIG9mZmxpbmU6IHByZWZs
+          aWdodCBiZWZvcmUgY2hhbmdpbmcgVUkgc3RhdGUgb3IgZW5xdWV1aW5nIEcyOS4KKyAgICAgICAgICAvLyBTVjA0IDMzNDogRzI5IG1heSBzZWxlY3QgVDAgaW50ZXJuYWxseS4gUmVqZWN0IGEgRFdJTiBHMjkK
+          KyAgICAgICAgICAvLyByZXF1ZXN0IHdoaWxlIFQxIGlzIHN0aWxsIHRoZSBhY3RpdmUgdG9vbDsgcmVxdWlyZSBhbiBleHBsaWNpdCwKKyAgICAgICAgICAvLyBjb21wbGV0ZWQgVDAgY2hhbmdlIGZpcnN0ICh0
+          aGUgc2FtZSBwb2xpY3kgYXMgRFdJTiBsZXZlbC1ob21lKS4KKyAgICAgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgYWN0aXZlX2V4dHJ1ZGVyICE9IDAKKyAgICAgICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVz
+          dGVkLCBYX0FYSVMpCisgICAgICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICAgICAgfHwgY2FyZC5pc1ByaW50
+          aW5nKCkgfHwgcHJpbnRpbmdJc1BhdXNlZCgpIHx8ICFzdjA0X2R3aW5fbW90aW9uX2lkbGUoKSkgeworICAgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBHMjkgZGVuaWVkOyBzZWxlY3Qg
+          VDAsIGhvbWUgWFlaIGFuZCBlbnN1cmUgaWRsZSIpOworICAgICAgICAgICAgYnJlYWs7CisgICAgICAgICAgfQorICAgICAgICAgIC8vIFNWMDQgMzM1OiBhIHF1ZXVlZCBHMjkgaXMgb25seSBhIHJlcXVlc3Qs
+          IE5PVCBwcm9vZiBvZiBzdWNjZXNzLgorICAgICAgICAgIC8vIE5vIGNvbXBsZXRpb24gaWNvbi9wYWdlIGJlZm9yZSBNYXJsaW4gaGFzIHJ1biB0aGUgRzI5IGNvbW1hbmQuCisgICAgICAgICAgLy8gVGhlIE9F
+          TSBHMjkgY2FsbGJhY2sgKFJUU19BdXRvQmVkTGV2ZWxQYWdlKSBzdGlsbCBuZWVkcyBhCisgICAgICAgICAgLy8gcmVhbCBvdXRjb21lIHNpZ25hbCBiZWZvcmUgaXQgY2FuIGNsYWltIHN1Y2Nlc3NmdWwgbGV2
+          ZWxpbmcuCisgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMjkiKSk7CiAgICAgICAgICAgd2FpdHdheSA9IDM7Ci0gICAgICAgICAgUlRTX1NuZERhdGEoMSwgQVVUT19CRURfTEVWRUxfSUNP
+          Tl9WUCk7Ci0gICAgICAgICAgUlRTX1NuZERhdGEoRXhjaGFuZ2VQYWdlQmFzZSArIDM4LCBFeGNoYW5nZXBhZ2VBZGRyKTsKLSAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcyOSIpKTsKICAg
+          ICAgICAgICAgCiAgICAgICAgICNlbmRpZgogICAgICAgfQogICAgICAgaWYgKHJlY2RhdC5kYXRhWzBdID09IDYpCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgIENlbnRyZSAxCi0gICAg
+          ICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgaWYgKCFJc1N0b3BwZWQoKSAmJiBhY3RpdmVfZXh0cnVkZXIgPT0gMAorICAgICAgICAgICAgJiYgIWNh
+          cmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCiAgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9B
+          WElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQotICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKKyAgICAgICAgICAgICYmIHN2MDRfZHdpbl9tb3Rpb25faWRsZSgp
+          KQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTU4Niw5ICsxNjE4LDExIEBACiAgICAgICBl
+          bHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA3KQogICAgICAgewogICAgICAgICAvLyBBc3NpdGFudCBMZXZlbCAsIEZyb250IExlZnQgMgotICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190
+          cnVzdGVkLCBYX0FYSVMpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgYWN0aXZlX2V4dHJ1ZGVyID09IDAKKyAgICAgICAgICAgICYmICFjYXJkLmlzUHJpbnRpbmcoKSAmJiAhcHJpbnRpbmdJc1BhdXNl
+          ZCgpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQogICAgICAgICAgICAgJiYgVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgJiYgVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykK
+          LSAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgICAgICAmJiBzdjA0X2R3aW5fbW90aW9uX2lkbGUoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0
+          OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MDAsOSArMTYzNCwxMSBAQAogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gOCkKICAgICAg
+          IHsKICAgICAgICAgLy8gQXNzaXRhbnQgTGV2ZWwgLCBGcm9udCBSaWdodCAzCi0gICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKKyAgICAgICAgaWYgKCFJc1N0
+          b3BwZWQoKSAmJiBhY3RpdmVfZXh0cnVkZXIgPT0gMAorICAgICAgICAgICAgJiYgIWNhcmQuaXNQcmludGluZygpICYmICFwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVz
+          dGVkLCBYX0FYSVMpCiAgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQotICAgICAgICAgICAgJiYgIXBsYW5uZXIuaGFzX2Jsb2Nr
+          c19xdWV1ZWQoKSkKKyAgICAgICAgICAgICYmIHN2MDRfZHdpbl9tb3Rpb25faWRsZSgpKQogICAgICAgICB7CiAgICAgICAgICAgd2FpdHdheSA9IDQ7CiAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQ
+          U1RSKCJHMSBGNjAwIFozIikpOwpAQCAtMTYxNCw5ICsxNjUwLDExIEBACiAgICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSA5KQogICAgICAgewogICAgICAgICAvLyBBc3NpdGFudCBMZXZlbCAsIEJh
+          Y2sgUmlnaHQgNAotICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIFRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCisgICAgICAgIGlmICghSXNTdG9wcGVkKCkgJiYgYWN0aXZlX2V4dHJ1ZGVyID09IDAKKyAg
+          ICAgICAgICAgICYmICFjYXJkLmlzUHJpbnRpbmcoKSAmJiAhcHJpbnRpbmdJc1BhdXNlZCgpCisgICAgICAgICAgICAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQogICAgICAgICAgICAgJiYgVEVTVChh
+          eGlzX3RydXN0ZWQsIFlfQVhJUykgJiYgVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKLSAgICAgICAgICAgICYmICFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCisgICAgICAgICAgICAmJiBzdjA0X2R3
+          aW5fbW90aW9uX2lkbGUoKSkKICAgICAgICAgewogICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiRzEgRjYwMCBaMyIpKTsKQEAgLTE2MjgsOSArMTY2
+          NiwxMSBAQAogICAgICAgZWxzZSBpZiAocmVjZGF0LmRhdGFbMF0gPT0gMTApCiAgICAgICB7CiAgICAgICAgIC8vIEFzc2l0YW50IExldmVsICwgQmFjayBMZWZ0IDUKLSAgICAgICAgaWYgKCFJc1N0b3BwZWQo
+          KSAmJiBURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQorICAgICAgICBpZiAoIUlzU3RvcHBlZCgpICYmIGFjdGl2ZV9leHRydWRlciA9PSAwCisgICAgICAgICAgICAmJiAhY2FyZC5pc1ByaW50aW5nKCkgJiYg
+          IXByaW50aW5nSXNQYXVzZWQoKQorICAgICAgICAgICAgJiYgVEVTVChheGlzX3RydXN0ZWQsIFhfQVhJUykKICAgICAgICAgICAgICYmIFRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpICYmIFRFU1QoYXhpc190
+          cnVzdGVkLCBaX0FYSVMpCi0gICAgICAgICAgICAmJiAhcGxhbm5lci5oYXNfYmxvY2tzX3F1ZXVlZCgpKQorICAgICAgICAgICAgJiYgc3YwNF9kd2luX21vdGlvbl9pZGxlKCkpCiAgICAgICAgIHsgICAKICAg
+          ICAgICAgICB3YWl0d2F5ID0gNDsKICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIkcxIEY2MDAgWjMiKSk7CkBAIC0xNjQwLDEyICsxNjgwLDE5IEBACiAgICAgICAgIH0KICAgICAgIH0KICAg
+          ICAgICBlbHNlIGlmIChyZWNkYXQuZGF0YVswXSA9PSAxMSkKLSAgICAgIHsgCi0gICAgICAgIHdhaXR3YXkgPSAzOwotICAgICAgICBSVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgNDAsIEV4Y2hhbmdl
+          cGFnZUFkZHIpOworICAgICAgeworICAgICAgICAvLyBTVjA0IDMzNTogWC1vbmx5IGhvbWluZyBmcm9tIERXSU4gbXVzdCBub3Qgb3ZlcnRha2UgYSBwcmludCwKKyAgICAgICAgLy8gcGVuZGluZyBHLWNvZGUs
+          IGEgbW92aW5nIHBsYW5uZXIsIG9yIGEgZGlmZmVyZW50IGFjdGl2ZSBjYXJyaWFnZS4KKyAgICAgICAgaWYgKElzU3RvcHBlZCgpIHx8IGFjdGl2ZV9leHRydWRlciAhPSAwCisgICAgICAgICAgICB8fCBjYXJk
+          LmlzUHJpbnRpbmcoKSB8fCBwcmludGluZ0lzUGF1c2VkKCkKKyAgICAgICAgICAgIHx8ICFzdjA0X2R3aW5fbW90aW9uX2lkbGUoKSkgeworICAgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjog
+          RzI4IFggZGVuaWVkOyBzZWxlY3QgVDAgYW5kIGVuc3VyZSBpZGxlIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0KICAgICAgICAgLy8gTmV2ZXIgcXVldWUgRzM0IGltbWVkaWF0ZWx5IGFmdGVyIGhv
+          bWluZzogZmFpbGVkIEcyOCBYIG11c3QKICAgICAgICAgLy8gbm90IGxlYXZlIGEgcG90ZW50aWFsbHkgdW5zYWZlIGNhbGlicmF0aW9uIG1vdmUgaW4gdGhlIHF1ZXVlLgogICAgICAgICBxdWV1ZS5lbnF1ZXVl
+          X25vd19QKFBTVFIoIkcyOCBYIikpOworICAgICAgICBSVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgNDAsIEV4Y2hhbmdlcGFnZUFkZHIpOwogICAgICAgICBVcGRhdGVfVGltZV9WYWx1ZSA9IDA7CiAg
+          ICAgICAgIHdhaXR3YXkgPSAwOwogICAgICAgfQpAQCAtMTY1Niw3ICsxNzAzLDggQEAKICAgICAgIC8vIERXSU4gd3JpdGVzIGN1cnJlbnRfcG9zaXRpb24gYmVmb3JlIGNhbGxpbmcgUlRTX2xpbmVfdG9fY3Vy
+          cmVudC4KICAgICAgIC8vIFJlamVjdCB1bnJlZmVyZW5jZWQgbW92ZXMgKmJlZm9yZSogbXV0YXRpbmcgcG9zaXRpb25hbCBzdGF0ZS4KICAgICAgIGlmIChJc1N0b3BwZWQoKSB8fCAhVEVTVChheGlzX3RydXN0
+          ZWQsIFhfQVhJUykKLSAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpKSB7CisgICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVzdGVk
+          LCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQorICAgICAgICAgIHx8ICFzdjA0X2R3aW5fbW90aW9uX2lkbGUoKSkgewogICAgICAgICBTRVJJQUxfRUNIT0xOUEdNKCJTVjA0IERXSU46
+          IG1hbnVhbCBYWVogbW92ZSBkZW5pZWQ7IGhvbWUgYWxsIGF4ZXMgZmlyc3QiKTsKICAgICAgICAgYnJlYWs7CiAgICAgICB9CkBAIC0xNzMzLDcgKzE3ODEsOCBAQAogICAgICAgLy8gRFdJTiB3cml0ZXMgY3Vy
+          cmVudF9wb3NpdGlvbiBiZWZvcmUgY2FsbGluZyBSVFNfbGluZV90b19jdXJyZW50LgogICAgICAgLy8gUmVqZWN0IHVucmVmZXJlbmNlZCBtb3ZlcyAqYmVmb3JlKiBtdXRhdGluZyBwb3NpdGlvbmFsIHN0YXRl
+          LgogICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9BWElTKQotICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQs
+          IFpfQVhJUykpIHsKKyAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBaX0FYSVMpCisgICAgICAgICAgfHwgIXN2MDRfZHdpbl9tb3Rpb25faWRs
+          ZSgpKSB7CiAgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogbWFudWFsIFhZWiBtb3ZlIGRlbmllZDsgaG9tZSBhbGwgYXhlcyBmaXJzdCIpOwogICAgICAgICBicmVhazsKICAgICAgIH0KQEAg
+          LTE3NjMsNyArMTgxMiw4IEBACiAgICAgICAvLyBEV0lOIHdyaXRlcyBjdXJyZW50X3Bvc2l0aW9uIGJlZm9yZSBjYWxsaW5nIFJUU19saW5lX3RvX2N1cnJlbnQuCiAgICAgICAvLyBSZWplY3QgdW5yZWZlcmVu
+          Y2VkIG1vdmVzICpiZWZvcmUqIG11dGF0aW5nIHBvc2l0aW9uYWwgc3RhdGUuCiAgICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCi0gICAgICAgICAgfHwgIVRFU1Qo
+          YXhpc190cnVzdGVkLCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKSkgeworICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQs
+          IFpfQVhJUykKKyAgICAgICAgICB8fCAhc3YwNF9kd2luX21vdGlvbl9pZGxlKCkpIHsKICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBtYW51YWwgWFlaIG1vdmUgZGVuaWVkOyBob21lIGFs
+          bCBheGVzIGZpcnN0Iik7CiAgICAgICAgIGJyZWFrOwogICAgICAgfQpAQCAtMTc4OSwxMyArMTgzOSwxOSBAQAogICAgICAgfQogICAgICAgYnJlYWs7CiAgICAgY2FzZSBTZWxlY3RFeHRydWRlcktleToKKyAg
+          ICAgIC8vIFNWMDQgMzMyOiBSZXF1ZXN0IFQwL1QxLCBidXQgbmV2ZXIgcHJlZGljdCBhIHN1Y2Nlc3NmdWwgdG9vbCBjaGFuZ2UuCisgICAgICAvLyBNYXJsaW4gb3ducyBhY3RpdmVfZXh0cnVkZXIuIFJUU19V
+          cGRhdGUoKSByZWZyZXNoZXMgdGhlIGljb24gZnJvbSB0aGUKKyAgICAgIC8vIGFjdHVhbCBhY3RpdmVfZXh0cnVkZXIgYWZ0ZXIgdGhlIHF1ZXVlZCBjb21tYW5kIGhhcyBleGVjdXRlZC4KKyAgICAgIC8vIFNW
+          MDQgMzMxOiBuZXZlciBzZW5kIFQwL1QxIGZyb20gRFdJTiB3aGlsZSBTRCBwcmludCBvciBwYXVzZSBpcyBhY3RpdmUuCiAgICAgICAvLyBOZXZlciBjaGFpbiBHMjggWCBhbmQgVDAvVDE6IHRoZSBxdWV1ZWQg
+          VCBjb21tYW5kIHdvdWxkIHN1cnZpdmUKICAgICAgIC8vIGFuIHVuc3VjY2Vzc2Z1bCBob21pbmcgc2VxdWVuY2UuIFJlcXVpcmUgY29tcGxldGVkIFhZWiBob21pbmcgZmlyc3QuCiAgICAgICBpZiAoSXNTdG9w
+          cGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCi0gICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKSkgeworICAgICAg
+          ICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykKKyAgICAgICAgICB8fCBjYXJkLmlzUHJpbnRpbmcoKSB8fCBwcmludGluZ0lzUGF1c2VkKCkg
+          fHwgIXN2MDRfZHdpbl9tb3Rpb25faWRsZSgpKSB7CiAgICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogdG9vbGNoYW5nZSBkZW5pZWQ7IGhvbWUgYWxsIGF4ZXMgZmlyc3QiKTsKICAgICAgICAg
+          YnJlYWs7CiAgICAgICB9CisgICAgICAvLyBEbyBub3QgdHJlYXQgdGhlIFVJJ3MgcXVldWVkIHJlcXVlc3QgYXMgY29tcGxldGVkIG1vdGlvbi4KICAgICAgIGlmKHJlY2RhdC5kYXRhWzBdID09IDEpCiAgICAg
+          ICB7CiAgICAgICAgIGlmKCFwbGFubmVyLmhhc19ibG9ja3NfcXVldWVkKCkpCkBAIC0xODAzLDIyICsxODU5LDEwIEBACiAgICAgICAgICAgaWYoYWN0aXZlX2V4dHJ1ZGVyID09IDApCiAgICAgICAgICAgewog
+          ICAgICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJUMSIpKTsKLSAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlciA9IDE7Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IHRydWU7
+          Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZm9udCA9IGFjdGl2ZV9leHRydWRlcjsKLQotICAgICAgICAgICAgUlRTX1NuZERhdGEoMTAgKiBYMl9NQVhfUE9TLCBBWElTX1hfQ09PUkRfVlApOwotICAg
+          ICAgICAgICAgUlRTX1NuZERhdGEoMSwgRVhDSEFOR0VfTk9aWkxFX0lDT05fVlApOwogICAgICAgICAgIH0KICAgICAgICAgICBlbHNlIGlmKGFjdGl2ZV9leHRydWRlciA9PSAxKQogICAgICAgICAgIHsKICAg
+          ICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDAiKSk7Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAwOwotICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZsYWcgPSBmYWxzZTsK
+          LSAgICAgICAgICAgIGFjdGl2ZV9leHRydWRlcl9mb250ID0gYWN0aXZlX2V4dHJ1ZGVyOwotCi0gICAgICAgICAgICBSVFNfU25kRGF0YSgxMCAqIFhfTUlOX1BPUywgQVhJU19YX0NPT1JEX1ZQKTsKLSAgICAg
+          ICAgICAgIFJUU19TbmREYXRhKDAsIEVYQ0hBTkdFX05PWlpMRV9JQ09OX1ZQKTsKICAgICAgICAgICB9CiAgICAgICAgIH0KICAgICAgIH0KQEAgLTE4MjYsMjQgKzE4NzAsMTMgQEAKICAgICAgIHsKICAgICAg
+          ICAgaWYoIXBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkKICAgICAgICAgewotICAgICAgICAgIHdhaXR3YXkgPSA0OwogICAgICAgICAgIGlmKGFjdGl2ZV9leHRydWRlciA9PSAwKQogICAgICAgICAgIHsK
+          ICAgICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDEiKSk7Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZmxhZyA9IHRydWU7Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAx
+          OwotICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZvbnQgPSBhY3RpdmVfZXh0cnVkZXI7Ci0gICAgICAgICAgICBSVFNfU25kRGF0YSgxLCBFWENIQU5HRV9OT1paTEVfSUNPTl9WUCk7Ci0gICAgICAgICAg
+          ICBSVFNfU25kRGF0YSgxMCAqIGN1cnJlbnRfcG9zaXRpb25bWF9BWElTXSwgQVhJU19YX0NPT1JEX1ZQKTsKICAgICAgICAgICB9CiAgICAgICAgICAgZWxzZSBpZihhY3RpdmVfZXh0cnVkZXIgPT0gMSkKICAg
+          ICAgICAgICB7CiAgICAgICAgICAgICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIlQwIikpOwotICAgICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyX2ZsYWcgPSBmYWxzZTsKLSAgICAgICAgICAgIGFjdGl2ZV9l
+          eHRydWRlciA9IDA7Ci0gICAgICAgICAgICBhY3RpdmVfZXh0cnVkZXJfZm9udCA9IGFjdGl2ZV9leHRydWRlcjsKLSAgICAgICAgICAgIFJUU19TbmREYXRhKDAsIEVYQ0hBTkdFX05PWlpMRV9JQ09OX1ZQKTsK
+          LSAgICAgICAgICAgIFJUU19TbmREYXRhKDEwICogY3VycmVudF9wb3NpdGlvbltYX0FYSVNdLCBBWElTX1hfQ09PUkRfVlApOwogICAgICAgICAgIH0KICAgICAgICAgICBSVFNfU25kRGF0YSgwLCBNT1RPUl9G
+          UkVFX0lDT05fVlApOwogICAgICAgICAgIHdhaXR3YXkgPSAwOwpAQCAtMTg1MiwxMCArMTg4NSwzOCBAQAogICAgICAgYnJlYWs7CiAKICAgICBjYXNlIEZpbGFtZW50TG9hZEtleToKKyAgICAgIC8vIFNWMDQg
+          MzMwIG9mZmxpbmU6IGRvIG5vdCBtdXRhdGUgRSBvciBzZWxlY3QgYSB0b29sIHdoaWxlIGFueSBqb2IgaXMgYWN0aXZlLgogICAgICAgaWYgKElzU3RvcHBlZCgpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWF9B
+          WElTKQotICAgICAgICAgIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWV9BWElTKSB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFpfQVhJUykpIHsKLSAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBm
+          aWxhbWVudCBtb3Rpb24gZGVuaWVkOyBob21lIGFsbCBheGVzIGZpcnN0Iik7CisgICAgICAgICAgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBZX0FYSVMpIHx8ICFURVNUKGF4aXNfdHJ1c3RlZCwgWl9BWElTKQor
+          ICAgICAgICAgIHx8IGNhcmQuaXNQcmludGluZygpIHx8IHByaW50aW5nSXNQYXVzZWQoKSB8fCAhc3YwNF9kd2luX21vdGlvbl9pZGxlKCkpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lO
+          OiBmaWxhbWVudCBhY3Rpb24gZGVuaWVkOyBob21lIFhZWiBhbmQgZW5zdXJlIGlkbGUiKTsKICAgICAgICAgYnJlYWs7CisgICAgICB9CisgICAgICAvLyBTVjA0IDMzMjogRmlsYW1lbnQgY29tbWFuZHMgbXVz
+          dCBub3Qgc2NoZWR1bGUgYSB0b29sIGNoYW5nZSBhbmQgdGhlbgorICAgICAgLy8gY2hhbmdlIHRoZSBFIHBvc2l0aW9uIG9mIGEgZGlmZmVyZW50IHRvb2wuIFNlbGVjdCBUMC9UMSBleHBsaWNpdGx5LAorICAg
+          ICAgLy8gbGV0IE1hcmxpbiBjb21wbGV0ZSBpdCwgdGhlbiByZXF1ZXN0IGZpbGFtZW50IG1vdmVtZW50LgorICAgICAgaWYgKFdJVEhJTihyZWNkYXQuZGF0YVswXSwgMSwgNCkKKyAgICAgICAgICAmJiBhY3Rp
+          dmVfZXh0cnVkZXIgIT0gKHJlY2RhdC5kYXRhWzBdID49IDMgPyAxIDogMCkpIHsKKyAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBzZWxlY3QgcmVxdWlyZWQgdG9vbCBmaXJzdDsgZmlsYW1l
+          bnQgZGVuaWVkIik7CisgICAgICAgIGJyZWFrOworICAgICAgfQorICAgICAgLy8gU1YwNCAzMzE6IHJlamVjdCBjb2xkIGV4dHJ1c2lvbiBiZWZvcmUgY2hhbmdpbmcgRSBzdGF0ZSBvciBzZWxlY3RpbmcgVDAv
+          VDEuCisgICAgICAvLyBLZWVwIHRoZSBvcmlnaW5hbCB0ZW1wZXJhdHVyZSBwcm9tcHQgYW5kIGV4cGxpY2l0IGhlYXRpbmcga2V5cyBpbnRhY3QuCisgICAgICBpZiAoV0lUSElOKHJlY2RhdC5kYXRhWzBdLCAx
+          LCA0KSkgeworICAgICAgICBjb25zdCBib29sIHVzZV90MSA9IHJlY2RhdC5kYXRhWzBdID49IDM7CisgICAgICAgIGlmICh1c2VfdDEgPyB0aGVybWFsTWFuYWdlci50ZW1wX2hvdGVuZFsxXS5jZWxzaXVzIDwg
+          KENoYW5nZUZpbGFtZW50MVRlbXAgLSA1KQorICAgICAgICAgICAgICAgICAgIDogdGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0uY2Vsc2l1cyA8IChDaGFuZ2VGaWxhbWVudDBUZW1wIC0gNSkpIHsKKyAg
+          ICAgICAgICBpZiAodXNlX3QxKSB7CisgICAgICAgICAgICBSVFNfU25kRGF0YSgoaW50KUNoYW5nZUZpbGFtZW50MVRlbXAsIENIQU5HRV9GSUxBTUVOVDFfVEVNUF9WUCk7CisgICAgICAgICAgICBSVFNfU25k
+          RGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMjUsIEV4Y2hhbmdlcGFnZUFkZHIpOworICAgICAgICAgIH0KKyAgICAgICAgICBlbHNlIHsKKyAgICAgICAgICAgIFJUU19TbmREYXRhKChpbnQpQ2hhbmdlRmlsYW1l
+          bnQwVGVtcCwgQ0hBTkdFX0ZJTEFNRU5UMF9URU1QX1ZQKTsKKyAgICAgICAgICAgIFJUU19TbmREYXRhKEV4Y2hhbmdlUGFnZUJhc2UgKyAyNCwgRXhjaGFuZ2VwYWdlQWRkcik7CisgICAgICAgICAgfQorICAg
+          ICAgICAgIFNFUklBTF9FQ0hPTE5QR00oIlNWMDQgRFdJTjogY29sZCBmaWxhbWVudCBtb3Rpb24gcmVmdXNlZCBiZWZvcmUgRS90b29sIG11dGF0aW9uIik7CisgICAgICAgICAgYnJlYWs7CisgICAgICAgIH0K
+          ICAgICAgIH0KICAgICAgIGlmKHJlY2RhdC5kYXRhWzBdID09IDEpCiAgICAgICB7CkBAIC0xODY4LDggKzE5MjksNiBAQAogICAgICAgICAgICAgfQogICAgICAgICAgICNlbmRpZgogICAgICAgICAgIGN1cnJl
+          bnRfcG9zaXRpb25bRV9BWElTXSAtPSBGaWxhbWVudDBMT0FEOwotICAgICAgICAgIGFjdGl2ZV9leHRydWRlciA9IDA7Ci0gICAgICAgICAgcXVldWUuZW5xdWV1ZV9ub3dfUChQU1RSKCJUMCIpKTsKIAogICAg
+          ICAgICAgIGlmKHRoZXJtYWxNYW5hZ2VyLnRlbXBfaG90ZW5kWzBdLmNlbHNpdXMgPCAoQ2hhbmdlRmlsYW1lbnQwVGVtcCAtIDUpKQogICAgICAgICAgIHsKQEAgLTE4OTQsOCArMTk1Myw2IEBACiAgICAgICAg
+          ICAgICB9CiAgICAgICAgICAgI2VuZGlmCiAgICAgICAgICAgY3VycmVudF9wb3NpdGlvbltFX0FYSVNdICs9IEZpbGFtZW50MExPQUQ7Ci0gICAgICAgICAgYWN0aXZlX2V4dHJ1ZGVyID0gMDsKLSAgICAgICAg
+          ICBxdWV1ZS5lbnF1ZXVlX25vd19QKFBTVFIoIlQwIikpOwogCiAgICAgICAgICAgaWYodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRbMF0uY2Vsc2l1cyA8IChDaGFuZ2VGaWxhbWVudDBUZW1wIC0gNSkpCiAg
+          ICAgICAgICAgewpAQCAtMTkyMCw4ICsxOTc3LDYgQEAKICAgICAgICAgICAgIH0KICAgICAgICAgICAjZW5kaWYKICAgICAgICAgICBjdXJyZW50X3Bvc2l0aW9uW0VfQVhJU10gLT0gRmlsYW1lbnQxTE9BRDsK
+          LSAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAxOwotICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDEiKSk7CiAKICAgICAgICAgICBpZiAodGhlcm1hbE1hbmFnZXIudGVtcF9ob3RlbmRb
+          MV0uY2Vsc2l1cyA8IChDaGFuZ2VGaWxhbWVudDFUZW1wIC0gNSkpCiAgICAgICAgICAgewpAQCAtMTk0Nyw4ICsyMDAyLDYgQEAKICAgICAgICAgICAgIH0KICAgICAgICAgICAjZW5kaWYKICAgICAgICAgICBj
+          dXJyZW50X3Bvc2l0aW9uW0VfQVhJU10gKz0gRmlsYW1lbnQxTE9BRDsKLSAgICAgICAgICBhY3RpdmVfZXh0cnVkZXIgPSAxOwotICAgICAgICAgIHF1ZXVlLmVucXVldWVfbm93X1AoUFNUUigiVDEiKSk7CiAK
+          ICAgICAgICAgICBpZih0aGVybWFsTWFuYWdlci50ZW1wX2hvdGVuZFsxXS5jZWxzaXVzIDwgKENoYW5nZUZpbGFtZW50MVRlbXAgLSA1KSkKICAgICAgICAgICB7CkBAIC0yMDYyLDcgKzIxMTUsNyBAQAogICAg
+          ICAgICBpZiAoSXNTdG9wcGVkKCkgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBYX0FYSVMpCiAgICAgICAgICAgICB8fCAhVEVTVChheGlzX3RydXN0ZWQsIFlfQVhJUykgfHwgIVRFU1QoYXhpc190cnVzdGVkLCBa
+          X0FYSVMpCiAgICAgICAgICAgICB8fCBjYXJkLmlzUHJpbnRpbmcoKSB8fCBwcmludGluZ0lzUGF1c2VkKCkKLSAgICAgICAgICAgIHx8IHBsYW5uZXIuaGFzX2Jsb2Nrc19xdWV1ZWQoKSkgeworICAgICAgICAg
+          ICAgfHwgIXN2MDRfZHdpbl9tb3Rpb25faWRsZSgpKSB7CiAgICAgICAgICAgU0VSSUFMX0VDSE9MTlBHTSgiU1YwNCBEV0lOOiBwb3dlci1sb3NzIHJlc3VtZSBkZW5pZWQ7IHZlcmlmeSBob21lIGFuZCBpZGxl
+          Iik7CiAgICAgICAgICAgYnJlYWs7CiAgICAgICAgIH0KQEAgLTI0MDIsOCArMjQ1NSw3IEBACiAgICAgICAgICAgICAgIHNob3djb3VudCsrOwogICAgICAgICAgICAgfQogICAgICAgICAgIH0KLSAgICAgICAg
+          ICAvLyBTVjA0IDMyNTogRG8gbm90IGVuYWJsZSBsZXZlbGluZyB3aXRob3V0IGEgdmVyaWZpZWQsIG1hY2hpbmUtc3BlY2lmaWMgbWVzaC4KLSAgICAvLyBBY3RpdmF0ZSBkZWxpYmVyYXRlbHkgd2l0aCBNNDIw
+          IFMxIG9ubHkgYWZ0ZXIgbWVzaCB2YWxpZGF0aW9uLgorICAgICAgICAgIC8vIFNWMDQgMzMwIG9mZmxpbmU6IG5ldmVyIGF1dG8tZW5hYmxlIGFuIHVudmVyaWZpZWQgbWVzaCAoTTQyMCBTMSByZW1vdmVkKS4K
+          ICAgICAgICAgI2VuZGlmCiAgICAgICAgIHpwcm9iZV96b2Zmc2V0ID0gMDsKICAgICAgICAgbGFzdF96b2Zmc2V0ID0gMDsKQEAgLTMwMTcsNyArMzA2OSwxMSBAQAogewogICBpZih3YWl0d2F5ID09IDMpCiAg
+          IHsKLSAgICBydHNjaGVjay5SVFNfU25kRGF0YShFeGNoYW5nZVBhZ2VCYXNlICsgMjIsIEV4Y2hhbmdlcGFnZUFkZHIpOworICAgIC8vIFNWMDQgMzM2IChvZmZsaW5lKTogdGhpcyBjYWxsYmFjayBydW5zIGFm
+          dGVyIEJPVEggc3VjY2Vzc2Z1bCBhbmQKKyAgICAvLyB1bnN1Y2Nlc3NmdWwgRzI5IHBhdGhzLiBJdCBtdXN0IE5FVkVSIGRpc3BsYXkgYW4gdW5xdWFsaWZpZWQKKyAgICAvLyBsZXZlbGluZy1zdWNjZXNzIHBh
+          Z2Ugb3Igc2V0IGEgc3VjY2VzcyBpY29uLiBSZXR1cm4gdG8gdGhlIG5ldXRyYWwKKyAgICAvLyBsZXZlbGluZyBtZW51OyBhbiBleHBsaWNpdCBHMjkgb3V0Y29tZSBBUEkgaXMgcmVxdWlyZWQgdG8gc2hvdyBQ
+          QVNTLgorICAgIHJ0c2NoZWNrLlJUU19TbmREYXRhKEV4Y2hhbmdlUGFnZUJhc2UgKyAyOCwgRXhjaGFuZ2VwYWdlQWRkcik7CiAgICAgd2FpdHdheSA9IDA7CiAgIH0KIH0K
+          B64_337
+          base64 -d evidence/dwin337/patch.b64 > evidence/dwin337/dwin337.patch
+          echo '95805300d927193b9571a770757dfb026f5da1f452e7730023bd19c762c3641a  evidence/dwin337/dwin337.patch' | sha256sum -c -
+          git -C oem_c13 apply --check ../evidence/dwin337/dwin337.patch
+          cp "$SOURCE" evidence/dwin337/dwin325_before.cpp
+          git -C oem_c13 apply ../evidence/dwin337/dwin337.patch
+          echo 'e733ab846b96a8d7325606eb91d60d1a08f4d53f7b24f617dec285fbb18b44ad  '"$SOURCE" | sha256sum -c -
+          python3 - <<'PY337'
+          from pathlib import Path
+          x=Path('oem_c13/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text()
+          checks={
+            'no_automatic_mesh_on': 'queue.enqueue_now_P(PSTR("M420 S1"))' not in x,
+            'queue_and_planner': 'return !planner.has_blocks_queued() && !queue.has_commands_queued();' in x,
+            'G29_success_neutral': 'SV04 336 (offline): this callback' in x and 'RTS_SndData(ExchangePageBase + 28, ExchangepageAddr)' in x,
+            'G29_preflight': 'SV04 DWIN: G29 denied; select T0, home XYZ and ensure idle' in x,
+            'cold_filament_guard': 'SV04 DWIN: cold filament motion refused before E/tool mutation' in x,
+            'tool_selection_guard': 'SV04 DWIN: toolchange denied; home all axes first' in x,
+            'no_predicted_T0_T1': 'SV04 332: Request T0/T1, but never predict a successful tool change.' in x,
+            'STOP_heating_closed': 'SV04 330 offline: do not mutate E or select a tool while any job is active.' in x,
+            'G28_X_guard': 'SV04 DWIN: G28 X denied; select T0 and ensure idle' in x,
+            'no_conflict_markers': not any(k in x for k in ('<<<<<<<', '=======', '>>>>>>>')),
+          }
+          for k,v in checks.items(): print(('PASS' if v else 'FAIL'),k)
+          assert all(checks.values())
+          PY337
+          echo 'SV04_345_BASE_DWIN337=PASS FLASH_ALLOWED=NO HARDWARE_TESTED=NO' | tee evidence/dwin337/result.txt
+      - name: G29 338 late-cancel guard (first step of 338-345) (strict patch on integrated 337, host regressions, NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/g29_338 g29_338
+          python3 - <<'PY338'
+          import base64, pathlib
+          s=(
+            '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'
+            'QVRFLmNwcFBLBQYAAAAABAAEAPkAAABeVAAAAAA='
+          )
+          pathlib.Path('g29_338/input.zip').write_bytes(base64.b64decode(''.join(s)))
+          PY338
+          (cd g29_338 && unzip -q input.zip)
+          python3 -I g29_338/test_338.py | tee evidence/g29_338/host_tests.txt
+          python3 -I g29_338/apply_338.py oem_c13/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/g29_338/patch.txt
+          grep -F 'G29_338=PATCHED sha256=' evidence/g29_338/patch.txt
+          grep -F 'G29_338_STATIC=10 PASS 0 FAIL' evidence/g29_338/host_tests.txt
+          sha256sum oem_c13/Marlin/src/gcode/bedlevel/abl/G29.cpp | tee evidence/g29_338/integrated_hash.txt
+          echo 'G29_338=NO_FLASH_HARDWARE_UNTESTED' > evidence/g29_338/status.txt
+      - name: Integrate 339-345 G29 and 340-343 DWIN deltas on verified 338/337 (NO FLASH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/offline_345
+          cat > evidence/offline_345/patches.b64 <<'B64_345'
+          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
+          B64_345
+          base64 -d evidence/offline_345/patches.b64 > evidence/offline_345/patches.zip
+          echo '31f2571105909bebcd4ee58c06840d4e629b4114de31566974f0ba6f25ef54ea  evidence/offline_345/patches.zip' | sha256sum -c -
+          unzip -q evidence/offline_345/patches.zip -d evidence/offline_345
+          python3 - <<'PY345'
+          from pathlib import Path
+          import hashlib, subprocess
+          root=Path('oem_c13'); ev=Path('evidence/offline_345')
+          items=[
+            ('Marlin/src/gcode/bedlevel/abl/G29.cpp','ff21f1af349a899250970c20cb5304d29aa67f5c2d256e53cbc62151e5cdca92','f57f76f55cc187183f5b2d1b9bc4f5d123ab31d5d43f196335ae2405a87472a4','G29_338_TO_345.patch'),
+            ('Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp','e733ab846b96a8d7325606eb91d60d1a08f4d53f7b24f617dec285fbb18b44ad','713f77d16544cd11d5bf43eab0de4daecf32c19f537a9515473ce99a43287883','DWIN337_TO_343.patch'),
+          ]
+          # All source hashes and patch applicability BEFORE any write.
+          for name,before,after,patchfile in items:
+            p=root/name
+            assert hashlib.sha256(p.read_bytes()).hexdigest()==before, 'SOURCE_MISMATCH '+name
+            subprocess.run(['git','-C',str(root),'apply','--check',str(Path('..')/ev/patchfile)],check=True)
+          for name,before,after,patchfile in items:
+            subprocess.run(['git','-C',str(root),'apply',str(Path('..')/ev/patchfile)],check=True)
+            assert hashlib.sha256((root/name).read_bytes()).hexdigest()==after, 'OUTPUT_HASH_MISMATCH '+name
+          g=(root/items[0][0]).read_text();d=(root/items[1][0]).read_text()
+          assert 'SV04 NEXT 345: fail closed immediately BEFORE' in g
+          assert 'SV04 NEXT 344: the completion callback must never accept' in g
+          assert 'SV04 NEXT 343:' in d
+          print('SV04_345_338_TO_345_PATCH=PASS; DWIN337_TO_343_PATCH=PASS; FLASH_ALLOWED=NO')
+          PY345
+          echo 'OFFLINE_338_TO_345_INTEGRATED=PASS FLASH_ALLOWED=NO HARDWARE_TESTED=NO' | tee evidence/offline_345/result.txt
+      - name: Export 337 merged DWIN evidence even if builds or EEPROM checks fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_345_DWIN_INTEGRATION_EVIDENCE_NO_FLASH
+          path: evidence/dwin337/
+          if-no-files-found: warn
+      - name: Build STM32 profiles independently, framework-first, NO FLASH
+        shell: bash
+        run: |
+          # NEVER call `pio run -t clean` before framework is installed.
+          # On a virgin runner this invokes generic_create_variant.py before
+          # framework-arduinoststm32 exists (verified failure in GitHub 308).
+          # A standard first `pio run` installs framework BEFORE pre scripts;
+          # this sequence is proven by BOTH successful 291 STM32 build logs.
+          set +e
+          fail=0
+          for profile in integrated_backend integrated_failclosed; do
+            mkdir -p "evidence/c13/$profile"
+            # Invalidate generated object files, NOT package/toolchain caches.
+            # This prevents accidentally reusing backend objects in failclosed.
+            rm -rf oem_c13/.pio/build/STM32F103RET6_creality
+            if [ "$profile" = integrated_failclosed ]; then
+              export PLATFORMIO_BUILD_FLAGS='-DSV04_CLAUDE_HOME_BACKEND_AVAILABLE=0'
+            else
+              export PLATFORMIO_BUILD_FLAGS=''
+            fi
+            /tmp/sv04_pio_309/bin/pio run -d oem_c13 -e STM32F103RET6_creality > "evidence/c13/$profile/build.log" 2>&1
+            build_rc=$?
+            # Exit 0 alone is not accepted without the PIO SUCCESS marker.
+            if [ "$build_rc" -eq 0 ] && ! grep -Fq '[SUCCESS]' "evidence/c13/$profile/build.log"; then
+              echo 'FAIL: PIO exit 0 without a build SUCCESS marker' >> "evidence/c13/$profile/build.log"
+              build_rc=42
+            fi
+            if [ "$build_rc" -eq 0 ]; then
+              mkdir -p "bin/$profile"
+              find oem_c13/.pio/build/STM32F103RET6_creality -maxdepth 1 -type f \( -name '*.bin' -o -name 'firmware.elf' \) -exec cp {} "bin/$profile/" \;
+              (cd "bin/$profile" && sha256sum * > SHA256SUMS.txt 2>/dev/null) || true
+              echo 'C13+DWIN319+DWIN320+DWIN321+DWIN322+DWIN323+DWIN325: DEVELOPMENT ONLY. FLASH_ALLOWED=NO HARDWARE_TESTED=NO. DWIN and IDEX hardware safety still unverified.' > "bin/$profile/NOT_APPROVED.txt"
+            fi
+            {
+              echo "BUILD_TREE=oem_c13"
+              echo "PROFILE=$profile"
+              echo 'BUILD_STRATEGY=FRAMEWORK_FIRST_DIRECT_PIO_RUN'
+              echo 'SOURCE_BASE=ROUTE_B_C13_PLUS_DWIN319_DWIN320_DWIN321_DWIN322_DWIN323_DWIN325_ON_C12_ON_C11_ON_C10_ON_C9_ON_318_NEW_COPY'
+              echo "BUILD_EXIT=$build_rc"
+              echo 'FLASH_ALLOWED=NO'
+              echo 'HARDWARE_TESTED=NO'
+            } | tee "evidence/c13/$profile/result.txt"
+            grep -nE 'fatal error:|error:|undefined reference|SUCCESS|FAILED' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/errors.txt" || true
+            grep -nE 'warning:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/warnings.txt" || true
+            grep -nE 'RAM:|Flash:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/ram_flash.txt" || true
+            grep -nE 'framework-arduinoststm32|toolchain-gccarmnoneeabi|PACKAGES:' "evidence/c13/$profile/build.log" > "evidence/c13/$profile/framework_packages.txt" || true
+            tail -n 45 "evidence/c13/$profile/build.log"
+            if [ "$build_rc" -ne 0 ]; then fail=1; fi
+          done
+          exit "$fail"
+
+      - name: Upload compiled firmware files (NOT approved for flashing)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_345_INTEGRATED_BINARIES_NO_FLASH_APPROVAL
+          path: bin/
+          if-no-files-found: warn
+
+      - name: Export sources and CORRECT preprocessor extracts for the EEPROM chain test (NON-FATAL, no effect on build result)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          unset PLATFORMIO_BUILD_FLAGS
+          mkdir -p export/src export/pre
+          for pat in settings.cpp settings.h crc16.cpp crc16.h 'M500-M504.cpp' 'eeprom*.cpp' 'eeprom*.h' 'persistent_store*' 'serial.h' 'macros.h' 'MarlinConfig.h' powerloss.cpp powerloss.h; do
+            find oem_c13/Marlin/src -name "$pat" -print | while read -r f; do mkdir -p "export/src/$(dirname "${f#oem_c13/}")"; cp "$f" "export/src/${f#oem_c13/}"; done
+          done
+          cp oem_c13/Marlin/Configuration.h oem_c13/Marlin/Configuration_adv.h export/src/ 2>/dev/null
+          cp evidence/eeprom_macros_real.txt evidence/serial_macros_real.txt export/ 2>/dev/null
+          /tmp/sv04_pio_309/bin/pio run -d oem_c13 -e STM32F103RET6_creality -t compiledb > export/pre/compiledb.log 2>&1
+          python3 - <<'PYX' > export/pre/LOG.txt 2>&1
+          import json, re, shlex, subprocess, os, glob
+          root = os.path.abspath('oem_c13'); outdir = os.path.abspath('export/pre')
+          db = glob.glob('oem_c13/compile_commands.json') + glob.glob('oem_c13/.pio/build/*/compile_commands.json')
+          print('compile_commands:', db)
+          want = ('settings.cpp', 'crc16.cpp', 'M500-M504.cpp', 'eeprom_flash.cpp', 'eeprom_wired.cpp', 'eeprom_bl24cxx.cpp', 'eeprom_if.cpp')
+          if db:
+              for e in json.load(open(db[0])):
+                  d = e.get('directory') or root
+                  f = os.path.normpath(os.path.join(d, e['file']))
+                  if os.path.basename(f) not in want: continue
+                  a = shlex.split(e.get('command') or ' '.join(e['arguments'])); out = []; i = 0
+                  while i < len(a):
+                      if a[i] == '-o': i += 2; continue
+                      if a[i] == '-c': i += 1; continue
+                      out.append(a[i]); i += 1
+                  rel = os.path.relpath(f, root) if f.startswith(root) else f
+                  base = re.sub(r'[^A-Za-z0-9_.]+', '_', rel).strip('_')
+                  for flag, suf in (('-E', '.i'), ('-E -dM', '.macros')):
+                      r = subprocess.run(out + flag.split() + ['-o', os.path.join(outdir, base + suf)], capture_output=True, text=True, cwd=d)
+                      print(base, flag, 'rc=%d' % r.returncode, r.stderr[:300].replace('\n', ' '))
+          PYX
+          (cd export && find . -type f ! -name SHA256SUMS.txt | sort | xargs sha256sum > SHA256SUMS.txt)
+          du -sh export; cat export/pre/LOG.txt | head -20
+      - name: 328B full-chain host test on the REAL preprocessed 328B tree (executes real save/load/validate/report/reset, negative cases, mutants) + crc16 equivalence
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/fullchain328b
+          rc=0
+          # AP1: Export vollstaendig und aktives Backend aus echter Konfiguration
+          for f in Marlin_src_module_settings.cpp Marlin_src_HAL_STM32_eeprom_bl24cxx.cpp Marlin_src_gcode_eeprom_M500_M504.cpp Marlin_src_libs_crc16.cpp; do
+            for e in i macros; do test -s "export/pre/$f.$e" && echo "OK   export/pre/$f.$e" || { echo "FEHLT export/pre/$f.$e"; rc=1; }; done
+          done > evidence/fullchain328b/ap1_export_check.txt 2>&1
+          cat evidence/fullchain328b/ap1_export_check.txt
+          if grep -q '^FEHLT' evidence/fullchain328b/ap1_export_check.txt; then rc=1; fi
+          grep -c . export/pre/LOG.txt >/dev/null && cp export/pre/LOG.txt evidence/fullchain328b/export_LOG.txt
+          grep -E '^#define (IIC_BL24CXX_EEPROM|FLASH_EEPROM_EMULATION|EEPROM_OFFSET|EEPROM_VERSION|MARLIN_EEPROM_SIZE)\b' export/pre/Marlin_src_module_settings.cpp.macros | tee evidence/fullchain328b/ap1_backend_macros.txt
+          grep -q 'IIC_BL24CXX_EEPROM' evidence/fullchain328b/ap1_backend_macros.txt || { echo 'FAIL: aktives Backend nicht IIC_BL24CXX_EEPROM'; rc=1; }
+          # 328B im echten .i vorhanden?
+          grep -c 'if (!eeprom_error) do{ serial_echo_start(); do{ serial_echopair_PGM(("Settings Stored (")' export/pre/Marlin_src_module_settings.cpp.i | tee evidence/fullchain328b/ap_328b_in_real_i.txt
+          # Vollkette
+          python3 -I t328b/test_328b.py export/pre evidence/fullchain328b/lauf --real328b 2>&1 | tee evidence/fullchain328b/test_328b_stdout.txt
+          [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+          # crc16-Aequivalenz (echtes libs/crc16.cpp gegen nachgebautes Modell)
+          python3 -I t328b/check_crc16.py export/pre/Marlin_src_libs_crc16.cpp.i evidence/fullchain328b/crc16 2>&1 | tee evidence/fullchain328b/crc16_equiv.txt
+          [ "${PIPESTATUS[0]}" -eq 0 ] || rc=1
+          echo "FULLCHAIN328B_RC=$rc FLASH_ALLOWED=NO HARDWARE_TESTED=NO" | tee evidence/fullchain328b/result.txt
+          exit "$rc"
+
+      - name: Upload source export (diagnostic only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_345_EEPROM_SOURCE_EXPORT_DIAGNOSTIC
+          path: export/
+          if-no-files-found: ignore
+
+      - name: Archive every log on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_345_INTEGRATED_STM32_LOGS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+
+  evaluate_builds:
+    name: "Evaluate both build jobs (no blanket success; red unless all four combinations are proven PASS)"
+    runs-on: ubuntu-24.04
+    needs: [baseline_c12, c13_changes]
+    if: always()
+    steps:
+      - name: Checkout input files
+        uses: actions/checkout@v4
+      - name: Verify and unpack the C9 package (evaluator; resolved by prefix + SHA-256)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            # Android haengt bei Mehrfach-Uploads " (1)" an. Datei wird ueber Namenspraefix UND SHA-256 gefunden, nie ueber den exakten Namen.
+            local prefix="$1" hash="$2" f
+            shopt -s nullglob
+            for f in "$prefix"*.zip; do
+              if [ "$(sha256sum -- "$f" | cut -d' ' -f1)" = "$hash" ]; then printf '%s' "$f"; return 0; fi
+            done
+            echo "FEHLT: keine Datei '$prefix*.zip' mit sha256 $hash im Repository-Stamm" >&2; ls -la >&2; return 1
+          }
+          F9="$(resolve SV04_NEXT_CLAUDE_C9_IDEX_BLTOUCH_G28_ABSCHLUSS d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb)"
+          echo "d7af0fa681d03112defd3b58618d3eef573ccc72d2d29a7efb7e5431e638a5eb  $F9" | sha256sum -c -
+          unzip -q "$F9" -d c9pkg
+      - name: Download both build artifacts (whatever exists)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SV04_345_*_STM32_LOGS_NO_FLASH
+          path: art
+      - name: Evaluate (exit code 0 only if oem_c12 and oem_c13 are PASS for both profiles)
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evaluation
+          find art -type f \( -path '*/c12_base/integrated_backend/result.txt' -o -path '*/c12_base/integrated_failclosed/result.txt' -o -path '*/c13/integrated_backend/result.txt' -o -path '*/c13/integrated_failclosed/result.txt' \) -print | sort | tee evaluation/FOUND_RESULTS.txt
+          test "$(wc -l < evaluation/FOUND_RESULTS.txt)" -eq 4
+          python3 c9pkg/02_PATCHES/evaluate_builds_c9.py art --trees oem_c12,oem_c13 --out evaluation/EVALUATION.md 2>&1 | tee evaluation/evaluation_stdout.txt
+          exit "${PIPESTATUS[0]}"
+      - name: Upload evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_345_BUILD_EVALUATION_W44
+          path: evaluation/
+          if-no-files-found: warn
