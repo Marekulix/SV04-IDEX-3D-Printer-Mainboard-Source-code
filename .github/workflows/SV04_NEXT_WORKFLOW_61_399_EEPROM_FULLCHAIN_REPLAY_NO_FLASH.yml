@@ -1,0 +1,147 @@
+name: "SV04 399 W61 EEPROM fullchain recovered 377 + C++ error replay - NO FLASH"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  replay:
+    name: "Restore SHA-pinned 377 runner; rerun both EEPROM host suites with explicit compiler errors"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout project without modifying history
+        uses: actions/checkout@v4
+
+      - name: Recover original W58 preprocessor evidence and source logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p w58/pre-archive w58/logs evidence/399
+          gh run download 43733170214 -n SV04_396_EEPROM_SOURCE_EXPORT_DIAGNOSTIC -D w58/pre-archive
+          gh run download 43733170214 -n SV04_396_INTEGRATED_STM32_LOGS_NO_FLASH -D w58/logs
+          find w58/pre-archive -type f | sort | tee evidence/399/pre_inventory.txt
+          find w58/logs -name build_error.txt -type f -print -exec sh -c 'echo "===== $1 ====="; cat "$1"' sh '{}' \; | tee evidence/399/original_cpp_errors.txt
+          test -s evidence/399/original_cpp_errors.txt
+
+      - name: Recover and hash-check both ORIGINAL test runners (including embedded 377 tar)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p t328b t377 evidence/399
+          python3 - <<'PY'
+          import pathlib,zipfile,io,re,base64,tarfile,hashlib
+          from pathlib import Path
+          # Original 328B shipped in repository as a ZIP. Do not mutate it.
+          p=next((x for x in Path('.').glob('SV04_NEXT_CLAUDE_328B_EEPROM_VOLLKETTE*.zip')),None)
+          if p is None: raise RuntimeError('MISSING_ORIGINAL_328B_ZIP')
+          with zipfile.ZipFile(p) as z:
+              for item in z.infolist():
+                  if item.is_dir():continue
+                  rel=Path(item.filename)
+                  if '03_TESTS' not in rel.parts:continue
+                  idx=rel.parts.index('03_TESTS')
+                  tail=rel.parts[idx+1:]
+                  if not tail or '..' in tail:raise RuntimeError('BAD_ZIP_PATH')
+                  dest=Path('t328b').joinpath(*tail)
+                  dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(item))
+          assert Path('t328b/test_328b.py').exists(),'328B_RUNNER_MISSING'
+          # W58 embeds t377 as a base64 gzipped tarball, NOT as a separate ZIP.
+          y=Path('.github/workflows/SV04_NEXT_WORKFLOW_58_396_EEPROM_GESAMTSICHERHEIT_NO_FLASH.yml').read_text()
+          match=re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > t377\.tgz",y)
+          assert match,'EMBEDDED_377_PAYLOAD_NOT_FOUND'
+          raw=base64.b64decode(match.group(1),validate=True)
+          sha=hashlib.sha256(raw).hexdigest()
+          expected='5542954ffe31affba5bb04070eb6a5accc54c5e74e9501746b2db08d81302a71'
+          assert sha==expected, 'EMBEDDED_377_SHA256_MISMATCH '
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+              members=tf.getmembers()
+              assert all(m.isfile() and not m.name.startswith('/') and '..' not in Path(m.name).parts for m in members)
+              for m in members:
+                  dst=Path(m.name)
+                  dst.parent.mkdir(parents=True,exist_ok=True)
+                  dst.write_bytes(tf.extractfile(m).read())
+          assert Path('t377/test_377.py').exists(),'377_RUNNER_NOT_RESTORED'
+          Path('evidence/399/original_runner_hashes.txt').write_text(
+            '377_tgz_sha256='+sha+'\n'+
+            '328b_test_sha256='+hashlib.sha256(Path('t328b/test_328b.py').read_bytes()).hexdigest()+'\n'+
+            '377_test_sha256='+hashlib.sha256(Path('t377/test_377.py').read_bytes()).hexdigest()+'\n')
+          print(Path('evidence/399/original_runner_hashes.txt').read_text())
+          PY
+
+      - name: Copy ORIGINAL test drivers and patch only crash reporting (never fake PASS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          # Preserve exact originals in evidence, and do not touch Marlin sources.
+          for f in ('t328b/test_328b.py','t377/test_377.py'):
+              p=Path(f); src=p.read_text(); Path('evidence/399/'+p.parent.name+'_original.py').write_text(src)
+              # Do not suppress C++ errors. Return an explicit FAIL dictionary
+              # so the caller cannot crash while reading None.values().
+              old="if r.returncode: open(os.path.join(d, 'build_error.txt'), 'w').write(r.stderr); return None"
+              new="if r.returncode: open(os.path.join(d, 'build_error.txt'), 'w').write(r.stderr); return {'CXX_COMPILE':'FAIL'}"
+              if old in src:
+                  src=src.replace(old,new)
+              else:
+                  # Runner may use a different spelling. Without a proven patch, fail closed.
+                  print('NO_EXACT_SAFE_PATCH',f)
+              p.write_text(src)
+              Path('evidence/399/'+p.parent.name+'_runner_patched.py').write_text(src)
+          PY
+
+      - name: Verify preprocessed C++ input and rerun ORIGINAL 328B suite
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/399/328b
+          pre=w58/pre-archive/pre
+          test -s "$pre/Marlin_src_module_settings.cpp.i" || { echo 'MISSING_SETTINGS_PREPROCESS'; exit 1; }
+          python3 -I t328b/test_328b.py "$pre" evidence/399/328b/out --real328b 2>&1 | tee evidence/399/328b/stdout.txt
+          rc=${PIPESTATUS[0]}
+          find evidence/399/328b -name build_error.txt -print -exec cat '{}' \; | tee evidence/399/328b/cpp_compile_errors.txt
+          echo "328B_RC=$rc" | tee evidence/399/328b/result.txt
+          exit "$rc"
+
+      - name: Rerun ORIGINAL 377 suite independently, even when 328B fails
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/399/377
+          pre=w58/pre-archive/pre
+          test -s "$pre/Marlin_src_module_settings.cpp.i" || { echo 'MISSING_SETTINGS_PREPROCESS'; exit 1; }
+          test -s t377/test_377.py || { echo 'MISSING_RESTORED_377'; exit 1; }
+          python3 -I t377/test_377.py "$pre" evidence/399/377/out --real377 2>&1 | tee evidence/399/377/stdout.txt
+          rc=${PIPESTATUS[0]}
+          find evidence/399/377 -name build_error.txt -print -exec cat '{}' \; | tee evidence/399/377/cpp_compile_errors.txt
+          echo "377_RC=$rc" | tee evidence/399/377/result.txt
+          exit "$rc"
+
+      - name: Final fail-closed verdict; no build or hardware approval
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'FLASH_ALLOWED=NO' | tee evidence/399/SAFETY_STATUS.txt
+          echo 'HARDWARE_TESTED=NO' | tee -a evidence/399/SAFETY_STATUS.txt
+          echo 'W61_IS_HOST_TEST_REPLAY_NOT_STM32_FIRMWARE_RELEASE' | tee -a evidence/399/SAFETY_STATUS.txt
+          for t in 328b 377; do
+            test -s "evidence/399/$t/result.txt" || { echo "MISSING_$t_RESULT"; exit 1; }
+            grep -q "^${t^^}_RC=0$" "evidence/399/$t/result.txt" || { echo "${t}_FAILED"; exit 1; }
+          done
+          echo 'EEPROM_RUNNERS_REPLAYED=PASS; FLASH_ALLOWED=NO'
+
+      - name: Upload self-contained diagnostic logs and patched runner copies
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_399_W61_EEPROM_FULLCHAIN_REPLAY_NO_FLASH
+          path: evidence/399/
+          if-no-files-found: warn
