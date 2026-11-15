@@ -1,0 +1,103 @@
+name: "SV04 398 W60 EEPROM compiler root cause and 377 runner search - NO FLASH"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose_398:
+    name: "Read actual W58 C++ build errors; locate 377; no release approval"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Download original W58 diagnostics and preprocessed code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p incoming/w58_logs incoming/w58_pre evidence/398
+          gh run download 43733170214 -n SV04_396_INTEGRATED_STM32_LOGS_NO_FLASH -D incoming/w58_logs
+          gh run download 43733170214 -n SV04_396_EEPROM_SOURCE_EXPORT_DIAGNOSTIC -D incoming/w58_pre
+          find incoming -type f | sort > evidence/398/input_inventory.txt
+          sha256sum evidence/398/input_inventory.txt > evidence/398/inventory_hash.txt
+
+      - name: Extract compiler failures and verify fullchain test results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, hashlib
+          root=Path('incoming/w58_logs'); out=Path('evidence/398');out.mkdir(parents=True, exist_ok=True)
+          candidates=sorted(p for p in root.rglob('*') if p.is_file() and (p.name=='build_error.txt' or 'fullchain' in str(p).lower() and p.suffix in ('.txt','.log')))
+          problems=[]; found=[]
+          for p in candidates:
+              rel=str(p.relative_to(root)); data=p.read_text(errors='replace')
+              if p.name=='build_error.txt':
+                  found.append(rel)
+                  problems.append({'source':rel,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'text':data[-15000:]})
+          (out/'compiler_errors.json').write_text(json.dumps(problems,indent=2,ensure_ascii=False))
+          with (out/'compiler_errors.txt').open('w') as f:
+              for issue in problems:
+                  f.write('\n====== '+issue['source']+' ======\n'+issue['text']+'\n')
+          (out/'compiler_error_count.txt').write_text(str(len(problems))+'\n')
+          print('COMPILER_ERROR_FILES',len(problems));print('PATHS',*found,sep='\n')
+          for p in sorted(root.rglob('result.txt')):
+              if 'fullchain' in str(p).lower() or 'sv04_377' in str(p).lower():
+                  print('FULLCHAIN_RESULT',p,p.read_text(errors='replace')[:600])
+          if not problems:
+              print('WARNING: no build_error.txt found in archived W58 logs, not evidence of success')
+          PY
+
+      - name: Locate both original test scripts, recursively including nested ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile,io,json,hashlib
+          target={'test_328b.py','test_377.py'}; hits={k:[] for k in target}
+          def scan(data,label,depth=0):
+              if depth>6 or len(data)>30000000:return
+              try:z=zipfile.ZipFile(io.BytesIO(data))
+              except (zipfile.BadZipFile,OSError):return
+              for item in z.infolist():
+                  if item.is_dir() or item.file_size>30000000:continue
+                  p=Path(item.filename)
+                  if p.name not in target and p.suffix.lower()!='.zip':continue
+                  raw=z.read(item)
+                  if p.name in target:hits[p.name].append({'source':label+'!'+item.filename,'sha256':hashlib.sha256(raw).hexdigest(),'lines':len(raw.splitlines())})
+                  if p.suffix.lower()=='.zip':scan(raw,label+'!'+item.filename,depth+1)
+          for p in Path('.').glob('*.zip'):
+              if p.stat().st_size<=30000000:scan(p.read_bytes(),str(p))
+          for p in Path('incoming').rglob('*.zip'):
+              if p.stat().st_size<=30000000:scan(p.read_bytes(),str(p))
+          for p in Path('.').rglob('test_*.py'):
+              if p.name in target and len(p.parts)<10:hits[p.name].append({'source':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          Path('evidence/398/runner_locations.json').write_text(json.dumps(hits,indent=2))
+          for name, locations in hits.items():print(name,'FOUND',len(locations),locations[:4])
+          PY
+
+      - name: Safety verdict, never convert diagnostic success to EEPROM approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'FLASH_ALLOWED=NO HARDWARE_TESTED=NO EEPROM_FULLCHAIN_VERIFIED=NO' | tee evidence/398/SAFETY_STATUS.txt
+          echo 'W60_DIAGNOSTIC_ONLY=YES; W58_CPP_ERRORS_REQUIRE_FIX_AND_RERUN' | tee evidence/398/VERDICT.txt
+          # Deliberately fail closed: W60 does NOT run a corrected firmware fullchain test.
+          exit 3
+
+      - name: Archive W60 root-cause evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_398_W60_EEPROM_COMPILER_ROOTCAUSE_NO_FLASH
+          path: evidence/398/
+          if-no-files-found: error
