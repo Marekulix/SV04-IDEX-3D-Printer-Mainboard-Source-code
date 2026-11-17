@@ -1,0 +1,77 @@
+name: SV04 NEXT 447 W75 - Original DWIN library archive NO FLASH
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/SV04_NEXT_WORKFLOW_75_447_DWIN_ORIGINAL_BIBLIOTHEK_NO_FLASH.yml'
+permissions:
+  contents: read
+jobs:
+  archive-dwin-sv04:
+    name: Archive original SV04 DWIN project - NO FLASH
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Retrieve verified public SV04 DWIN source and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          git clone --depth 1 https://github.com/johncarlson21/SV04-Touchscreen.git external/SV04-Touchscreen
+          git -C external/SV04-Touchscreen rev-parse HEAD > SV04_DWIN_UPSTREAM_COMMIT.txt
+          test -s external/SV04-Touchscreen/DWprj.hmi
+          test -s external/SV04-Touchscreen/DWIN_SET/13TouchFile.bin
+          test -s external/SV04-Touchscreen/DWIN_SET/14ShowFile.bin
+          test -s external/SV04-Touchscreen/DWIN_SET/22_Config.bin
+          mkdir -p external/release
+          curl -fL --retry 3 --show-error --silent \
+            'https://github.com/johncarlson21/SV04-Touchscreen/releases/download/V1.2.7/DWIN_SET-1.2.7.zip' \
+            -o external/release/DWIN_SET-1.2.7_ORIGINAL.zip
+          python3 - <<'PY_CHECK'
+          import zipfile
+          p='external/release/DWIN_SET-1.2.7_ORIGINAL.zip'
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None, 'Invalid original release ZIP'
+              print('Release ZIP integrity okay, entries=',len(z.namelist()))
+          PY_CHECK
+      - name: Assemble authentic DWIN assets, HMI source and SHA256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/SV04_DWIN_ORIGINAL_447/DWIN_SET output/SV04_DWIN_ORIGINAL_447/REFERENCES
+          cp -a external/SV04-Touchscreen/DWIN_SET/. output/SV04_DWIN_ORIGINAL_447/DWIN_SET/
+          cp external/SV04-Touchscreen/DWprj.hmi output/SV04_DWIN_ORIGINAL_447/DWprj.hmi
+          cp external/release/DWIN_SET-1.2.7_ORIGINAL.zip output/SV04_DWIN_ORIGINAL_447/REFERENCES/
+          cp SV04_DWIN_UPSTREAM_COMMIT.txt output/SV04_DWIN_ORIGINAL_447/REFERENCES/UPSTREAM_COMMIT.txt
+          python3 - <<'PY_MANIFEST'
+          from pathlib import Path
+          from collections import Counter
+          import hashlib,csv
+          root=Path('output/SV04_DWIN_ORIGINAL_447')
+          assets=[x for x in (root/'DWIN_SET').rglob('*') if x.is_file()]
+          assert len([p for p in assets if p.suffix.lower()=='.jpg'])>=50
+          assert all((root/'DWIN_SET'/n).stat().st_size>0 for n in ['13TouchFile.bin','14ShowFile.bin','22_Config.bin'])
+          with (root/'REFERENCES'/'SHA256_MANIFEST.csv').open('w',newline='') as f:
+              w=csv.writer(f);w.writerow(['relative_path','size_bytes','sha256'])
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  if p.name=='SHA256_MANIFEST.csv':continue
+                  w.writerow([p.relative_to(root),p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()])
+          with (root/'REFERENCES'/'STATUS.txt').open('w') as f:
+              f.write('SV04-NEXT public original touchscreen asset archive. NOT FLASH APPROVED.\n')
+              f.write('Source: johncarlson21/SV04-Touchscreen; commit in UPSTREAM_COMMIT.txt\n')
+              f.write('DWIN files: '+str(len(assets))+'\n')
+              f.write('Not yet verified for SV04-NEXT Marlin 446 VP mappings, 16 added HMI objects or hardware.\n')
+          print('DWIN asset count:',len(assets),Counter(x.suffix for x in assets))
+          PY_MANIFEST
+          cd output
+          zip -qr9 SV04_NEXT_447_DWIN_ORIGINAL_BIBLIOTHEK_NO_FLASH.zip SV04_DWIN_ORIGINAL_447
+          unzip -tq SV04_NEXT_447_DWIN_ORIGINAL_BIBLIOTHEK_NO_FLASH.zip
+      - name: Upload real original DWIN library, NO FLASH
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_447_DWIN_ORIGINAL_BIBLIOTHEK_NO_FLASH
+          path: output/SV04_NEXT_447_DWIN_ORIGINAL_BIBLIOTHEK_NO_FLASH.zip
+          if-no-files-found: error
+          retention-days: 30
