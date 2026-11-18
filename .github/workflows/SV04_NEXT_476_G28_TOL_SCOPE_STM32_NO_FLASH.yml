@@ -1,0 +1,102 @@
+name: SV04 NEXT 476 G28 translation-unit scope repair STM32 NO FLASH
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stm32-fullsource:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 65
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Verify complete 474 source archive and extract isolated build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence /tmp/sv04_474_full
+          test -s SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip
+          echo '5c478e23a6944dca348e2419b17d410404241630cc8345023d0230e57f91523f  SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip' | sha256sum -c -
+          unzip -q SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip -d /tmp/sv04_474_full
+          test -s /tmp/sv04_474_full/platformio.ini
+          test -s /tmp/sv04_474_full/Marlin/Configuration.h
+          # Archive 474 contains complete patched Marlin sources but no ini/ directory.
+          # Keep original project baseline intact; use checked-out repository's config files.
+          test -s ini/stm32f1.ini
+          test -s ini/stm32-common.ini
+          test ! -e /tmp/sv04_474_full/ini
+          cp -a ini /tmp/sv04_474_full/ini
+          test -s /tmp/sv04_474_full/ini/stm32f1.ini
+          grep -Fq '[env:STM32F103RET6_creality]' /tmp/sv04_474_full/ini/stm32f1.ini
+          sha256sum /tmp/sv04_474_full/platformio.ini /tmp/sv04_474_full/ini/stm32f1.ini > evidence/verified_build_configuration.sha256
+          printf 'ARCHIVE_474=VERIFIED\nINI_FROM_REPOSITORY=VERIFIED\n' > evidence/configuration_preflight.txt
+          test -s /tmp/sv04_474_full/Marlin/src/lcd/e3v2/creality/sv04_dwin_hmi_bindings.h
+          test -s /tmp/sv04_474_full/Marlin/src/module/sv04_claude_idex_guard.h
+          python3 - <<'PYVERIFY'
+          import json,hashlib,pathlib
+          root=pathlib.Path('/tmp/sv04_474_full')
+          sources=json.loads((root/'SV04_NEXT_474_PATCH_SHA256.json').read_text())
+          assert len(sources)==4
+          for name,digest in sources.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest, name
+              print('PATCH_470_VERIFIED', name)
+          PYVERIFY
+          printf 'FLASH_ALLOWED=NO\nHARDWARE_TESTED=NO\nG28_OK=NO\nBUILD_476=STARTED\n' > evidence/STATUS.txt
+      - name: Repair G28 tolerance macro scope without changing 0.50 mm cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_FIX'
+          from pathlib import Path
+          root=Path('/tmp/sv04_474_full')
+          g28=root/'Marlin/src/gcode/calibrate/G28.cpp'
+          motion=root/'Marlin/src/module/motion.cpp'
+          s=g28.read_text()
+          m=motion.read_text()
+          assert '#define SV04_T1_CALIBRATION_TOL_MM 0.50f' in m
+          assert m.count('static_assert(SV04_T1_CALIBRATION_TOL_MM >= 0.0f && SV04_T1_CALIBRATION_TOL_MM <= 0.50f')==1
+          assert s.count('float(SV04_T1_CALIBRATION_TOL_MM)')==2
+          anchor='#include "../../inc/MarlinConfig.h"'
+          assert s.count(anchor)==1
+          assert 'SV04: G28 X2 tolerance must not exceed' not in s
+          addition=('\n#ifndef SV04_T1_CALIBRATION_TOL_MM\n'
+                    '  #define SV04_T1_CALIBRATION_TOL_MM 0.50f\n'
+                    '#endif\n'
+                    'static_assert(SV04_T1_CALIBRATION_TOL_MM >= 0.0f && SV04_T1_CALIBRATION_TOL_MM <= 0.50f,\n'
+                    '              "SV04: G28 X2 tolerance must not exceed 0.50 mm");\n')
+          s=s.replace(anchor,anchor+'\n'+addition,1)
+          g28.write_text(s)
+          print('G28_TOL_SCOPE_REPAIRED')
+          PY_FIX
+          sha256sum /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp /tmp/sv04_474_full/Marlin/src/module/motion.cpp > evidence/476_g28_motion_patched.sha256
+          grep -Fq 'SV04: G28 X2 tolerance must not exceed 0.50 mm' /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp
+          printf 'T1_TOLERANCE=0.50mm_MAX\nFLASH_ALLOWED=NO\n' > evidence/476_scope_fix.txt
+      - name: Install PlatformIO
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user platformio==6.1.18
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run preserved native tests from 470
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -Wall -Wextra -Werror /tmp/sv04_474_full/SV04_NEXT_474_NATIVE_TEST.cpp -o /tmp/sv04_474_native
+          /tmp/sv04_474_native | tee evidence/native_470.log
+      - name: Build STM32 with G28 tolerance scope repaired
+        shell: bash
+        run: |
+          set -euo pipefail
+          pio run -d /tmp/sv04_474_full -e STM32F103RET6_creality 2>&1 | tee evidence/stm32_476.log
+          test -s /tmp/sv04_474_full/.pio/build/STM32F103RET6_creality/firmware.bin
+          cp /tmp/sv04_474_full/.pio/build/STM32F103RET6_creality/firmware.bin evidence/SV04_476_BUILD_CANDIDATE_NOT_APPROVED_FOR_FLASH.bin
+          sha256sum evidence/SV04_476_BUILD_CANDIDATE_NOT_APPROVED_FOR_FLASH.bin > evidence/firmware.sha256
+          printf 'FLASH_ALLOWED=NO\nHARDWARE_TESTED=NO\nG28_OK=NO\nBUILD_476=PASS\n' > evidence/STATUS.txt
+      - name: Upload diagnostics on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_476_BUILD_AND_DIAGNOSTICS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
