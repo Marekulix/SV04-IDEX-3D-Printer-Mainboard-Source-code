@@ -1,0 +1,54 @@
+name: SV04 NEXT 484 DWIN authentic source and binary staging NO FLASH
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stage_dwin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout frozen mainboard source (read only)
+        uses: actions/checkout@v4
+      - name: Fetch and pin authentic DWIN reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/johncarlson21/SV04-Touchscreen.git /tmp/sv04-dwin-reference
+          git -C /tmp/sv04-dwin-reference rev-parse HEAD | tee DWIN_REFERENCE_COMMIT.txt
+          mkdir -p staging/OEM_DWIN_SET staging/evidence
+          python3 - <<'PY'
+          import pathlib,hashlib,json,shutil
+          root=pathlib.Path('/tmp/sv04-dwin-reference/DWIN_SET')
+          out=pathlib.Path('staging/OEM_DWIN_SET')
+          wanted=['13TouchFile.bin','14ShowFile.bin','22_Config.bin','DWINOS_page_change.bin','T5LCFG_272480.CFG']
+          for n in wanted:
+              src=root/n
+              assert src.is_file() and src.stat().st_size>0, f'Missing original reference: {n}'
+              shutil.copy2(src,out/n)
+          images=sorted(root.glob('*.jpg'))
+          ids=sorted(int(x.stem) for x in images if x.stem.isdigit())
+          assert len(ids)>=50, 'Original image library unexpectedly incomplete'
+          data={'classification':'OEM REFERENCE ONLY, NOT CUSTOM SV04 NEXT DISPLAY FIRMWARE',
+                'flash_allowed':False,'mainboard_480_modified':False,
+                'oem_reference_only':True,'custom_page_59_included':59 in ids,
+                'image_count':len(images), 'missing_custom_page_59':59 not in ids,
+                'files':{p.name:{'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in out.iterdir()}}
+          pathlib.Path('staging/evidence/manifest.json').write_text(json.dumps(data,indent=2)+'\n')
+          for img in images:shutil.copy2(img,out/img.name)
+          print(json.dumps(data,indent=2))
+          PY
+      - name: Explicit non-flash gating
+        shell: bash
+        run: |
+          echo 'FLASH_ALLOWED=NO' > staging/evidence/STATUS.txt
+          echo 'These are unmodified upstream OEM binaries; custom page 59 and bindings are NOT built.' >> staging/evidence/STATUS.txt
+          echo 'Mainboard 480 is NOT rebuilt or modified.' >> staging/evidence/STATUS.txt
+      - name: Upload clearly labelled reference only
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_484_OEM_DWIN_REFERENCE_NOT_CUSTOM_NO_FLASH
+          path: |
+            staging/
+            DWIN_REFERENCE_COMMIT.txt
+          if-no-files-found: error
