@@ -1,0 +1,70 @@
+name: SV04 NEXT 485 DWIN PAGE59 GRAPHICS STAGING NO FLASH
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dwin_page59:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned original DWIN project and create page 59
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check pillow
+          git clone https://github.com/johncarlson21/SV04-Touchscreen.git /tmp/dwin_source
+          mkdir -p staging/DWIN_SET staging/evidence
+          cp /tmp/dwin_source/DWIN_SET/* staging/DWIN_SET/
+          cp /tmp/dwin_source/DWprj.hmi staging/evidence/DWprj_REFERENCE_UNMODIFIED.hmi
+          python3 - <<'PY'
+          import pathlib
+          target=pathlib.Path('staging/DWIN_SET')
+          for name in ['13TouchFile.bin','14ShowFile.bin','22_Config.bin']:
+              assert (target/name).is_file(),f'Original DWIN reference lacks {name}'
+          PY
+          cat > /tmp/create_page59.py <<'PY_PAGE59'
+          #!/usr/bin/env python3
+          """Generate a reproducible DWIN 480x272 page-59 image asset, NOT a display firmware."""
+          from PIL import Image,ImageDraw,ImageFont
+          from pathlib import Path
+          import hashlib,json,sys
+          out=Path(sys.argv[1]) if len(sys.argv)>1 else Path('staging/DWIN_SET')
+          out.mkdir(parents=True,exist_ok=True)
+          W,H=480,272
+          img=Image.new('RGB',(W,H),(14,27,42)); d=ImageDraw.Draw(img)
+          fonts=['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf','/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']
+          def font(n):
+           for p in fonts:
+            try:return ImageFont.truetype(p,n)
+            except OSError:pass
+           return ImageFont.load_default()
+          f=font(16); fsmall=font(12); ft=font(21)
+          d.rectangle((0,0,W,42),fill=(22,52,75))
+          d.text((15,8),'SV04  |  BETTVERMESSUNG 4 x 4',font=ft,fill=(240,247,253))
+          d.text((15,48),'Messwerte: Live-Daten nur mit passender DWIN-HMI-Bindung',font=fsmall,fill=(255,192,99))
+          # Intentionally blank 4x4 positions; fixed value labels would falsely imply real data.
+          for row in range(4):
+           for col in range(4):
+            x=26+col*110; y=71+row*38
+            d.rounded_rectangle((x,y,x+96,y+32),radius=5,outline=(104,156,185),width=2,fill=(28,50,69))
+            d.text((x+11,y+8),f'{row+1}.{col+1}:  --',font=fsmall,fill=(221,230,237))
+          d.rounded_rectangle((20,234,119,265),radius=5,fill=(53,98,127),outline=(137,194,219))
+          d.text((43,242),'ZURUECK',font=fsmall,fill=(255,255,255))
+          d.text((145,244),'Seite 59  |  Navigation 28 ↔ 59: HMI noch offen',font=fsmall,fill=(255,192,99))
+          path=out/'59.jpg';img.save(path,format='JPEG',quality=95,subsampling=0)
+          assert Image.open(path).size==(480,272)
+          manifest={'version':485,'classification':'DWIN page-59 graphics asset only, NOT FLASHABLE','flash_allowed':False,'mainboard_480_modified':False,'hmi_binding_complete':False,'page_59':{'name':path.name,'width':480,'height':272,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()},'required_hmi_tasks':['Bind page ID 59 in manufacturer DWIN project','Bind 16 numeric VPs to runtime mesh values from firmware 480','Bind touch navigation 28 <-> 59','Build 13TouchFile.bin and 14ShowFile.bin from changed HMI project','Verify both binaries on physical DWIN hardware']}
+          (out.parent/'DWIN_485_MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          print(json.dumps(manifest,indent=2))
+          PY_PAGE59
+          python3 /tmp/create_page59.py staging/DWIN_SET
+          echo 'FLASH_ALLOWED=NO - 59.jpg exists, HMI binding and custom binaries NOT built' > staging/evidence/STATUS.txt
+          git -C /tmp/dwin_source rev-parse HEAD > staging/evidence/UPSTREAM_COMMIT.txt
+      - name: Upload DWIN page-59 development assets only
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_485_PAGE59_ASSET_NO_FLASH
+          path: staging/
+          if-no-files-found: error
