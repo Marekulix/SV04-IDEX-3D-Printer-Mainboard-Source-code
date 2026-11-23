@@ -1,0 +1,390 @@
+name: SV04 NEXT 482 unique BIN filename based on 480 safety gated STM32 NO FLASH
+# EXTERNAL DEPENDENCY (repo root): SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip (SHA256 pinned below) and ini/ from the repository.
+# FLASH_ALLOWED=NO HARDWARE_TESTED=NO G28_OK=NO. Safety logic is IDENTICAL to 479; 480 only changes the version identity and adds tests/gates.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stm32-fullsource:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 65
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Verify complete 474 source archive and extract isolated build tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence /tmp/sv04_474_full
+          test -s SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip
+          echo '5c478e23a6944dca348e2419b17d410404241630cc8345023d0230e57f91523f  SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip' | sha256sum -c -
+          unzip -q SV04_NEXT_474_FULL_SOURCE_STM32_BUILD_CANDIDATE_NO_FLASH.zip -d /tmp/sv04_474_full
+          test -s /tmp/sv04_474_full/platformio.ini
+          test -s /tmp/sv04_474_full/Marlin/Configuration.h
+          # Archive 474 contains complete patched Marlin sources but no ini/ directory.
+          # Keep original project baseline intact; use checked-out repository's config files.
+          test -s ini/stm32f1.ini
+          test -s ini/stm32-common.ini
+          test ! -e /tmp/sv04_474_full/ini
+          cp -a ini /tmp/sv04_474_full/ini
+          test -s /tmp/sv04_474_full/ini/stm32f1.ini
+          grep -Fq '[env:STM32F103RET6_creality]' /tmp/sv04_474_full/ini/stm32f1.ini
+          sha256sum /tmp/sv04_474_full/platformio.ini /tmp/sv04_474_full/ini/stm32f1.ini > evidence/verified_build_configuration.sha256
+          printf 'ARCHIVE_474=VERIFIED\nINI_FROM_REPOSITORY=VERIFIED\n' > evidence/configuration_preflight.txt
+          test -s /tmp/sv04_474_full/Marlin/src/lcd/e3v2/creality/sv04_dwin_hmi_bindings.h
+          test -s /tmp/sv04_474_full/Marlin/src/module/sv04_claude_idex_guard.h
+          python3 - <<'PYVERIFY'
+          import json,hashlib,pathlib
+          root=pathlib.Path('/tmp/sv04_474_full')
+          sources=json.loads((root/'SV04_NEXT_474_PATCH_SHA256.json').read_text())
+          assert len(sources)==4
+          for name,digest in sources.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest, name
+              print('PATCH_470_VERIFIED', name)
+          PYVERIFY
+          printf 'FLASH_ALLOWED=NO\nHARDWARE_TESTED=NO\nG28_OK=NO\nBUILD_478=STARTED\n' > evidence/STATUS.txt
+      - name: Repair G28 tolerance macro scope without changing 0.50 mm cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_FIX'
+          from pathlib import Path
+          root=Path('/tmp/sv04_474_full')
+          g28=root/'Marlin/src/gcode/calibrate/G28.cpp'
+          motion=root/'Marlin/src/module/motion.cpp'
+          s=g28.read_text()
+          m=motion.read_text()
+          assert '#define SV04_T1_CALIBRATION_TOL_MM 0.50f' in m
+          assert m.count('static_assert(SV04_T1_CALIBRATION_TOL_MM >= 0.0f && SV04_T1_CALIBRATION_TOL_MM <= 0.50f')==1
+          assert s.count('float(SV04_T1_CALIBRATION_TOL_MM)')==2
+          anchor='#include "../../inc/MarlinConfig.h"'
+          assert s.count(anchor)==1
+          assert 'SV04: G28 X2 tolerance must not exceed' not in s
+          addition=('\n#ifndef SV04_T1_CALIBRATION_TOL_MM\n'
+                    '  #define SV04_T1_CALIBRATION_TOL_MM 0.50f\n'
+                    '#endif\n'
+                    'static_assert(SV04_T1_CALIBRATION_TOL_MM >= 0.0f && SV04_T1_CALIBRATION_TOL_MM <= 0.50f,\n'
+                    '              "SV04: G28 X2 tolerance must not exceed 0.50 mm");\n')
+          s=s.replace(anchor,anchor+'\n'+addition,1)
+          g28.write_text(s)
+          print('G28_TOL_SCOPE_REPAIRED')
+          PY_FIX
+          sha256sum /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp /tmp/sv04_474_full/Marlin/src/module/motion.cpp > evidence/476_g28_motion_patched.sha256
+          grep -Fq 'SV04: G28 X2 tolerance must not exceed 0.50 mm' /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp
+          printf 'T1_TOLERANCE=0.50mm_MAX\nFLASH_ALLOWED=NO\n' > evidence/476_scope_fix.txt
+      - name: SV04 477 precise X2 gate diagnostics without relaxing carriage safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_477'
+          from pathlib import Path
+          p=Path('/tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp')
+          s=p.read_text()
+          assert s.count('SV04 469 G28: X2 configuration rejected before motion') == 1
+          assert s.count('sv04_p1_x_attempted = true;') == 1
+          assert s.count('SV04 469 G28: T1 gate failed; X1 homing refused') == 1
+          assert s.count('if (!sv04_p1_x_failed) {') >= 1
+          # NOTE: purely serial output. These extra observations do not assert physical
+          # endstop engagement, alter calibration, or permit any additional movement.
+          s=s.replace('''          SERIAL_ERROR_MSG("SV04 469 G28: X2 configuration rejected before motion");''',
+                      '''          SERIAL_ERROR_MSG("SV04 477: PRECHECK_CONFIG_FAIL; no X homing move authorized");
+          SERIAL_ECHOLNPGM("SV04 477 precheck_x2_home_mm=", sv04_x2_home);
+          SERIAL_ECHOLNPGM("SV04 477 precheck_t0_home_mm=", x_home_pos(0));
+          SERIAL_ECHOLNPGM("SV04 477 precheck_endstop_not_tested=1");
+          SERIAL_ERROR_MSG("SV04 469 G28: X2 configuration rejected before motion");''',1)
+          s=s.replace('''          sv04_p1_x_attempted = true;''',
+                      '''          sv04_p1_x_attempted = true;
+          SERIAL_ECHOLNPGM("SV04 477 x2_homeaxis_returned=1");
+          SERIAL_ECHOLNPGM("SV04 477 x2_completed=", int(sv04_p1_t1_x_completed));
+          SERIAL_ECHOLNPGM("SV04 477 x2_trusted=", int(axis_is_trusted(X_AXIS)));
+          SERIAL_ECHOLNPGM("SV04 477 x2_config_plausible=", int(sv04_p1_t1_config_plausible()));
+          SERIAL_ECHOLNPGM("SV04 477 x2_fail_mask=", int(sv04_p1_t1_home_fail_mask()));''',1)
+          s=s.replace('''            SERIAL_ERROR_MSG("SV04 469 G28: T1 gate failed; X1 homing refused");''',
+                      '''            SERIAL_ERROR_MSG("SV04 477: POST_X2_GATE_FAIL; X1 blocked safely");
+            if (!sv04_p1_t1_x_completed) SERIAL_ERROR_MSG("SV04 477 reason=X2_COMPLETION_FALSE");
+            if (!axis_is_trusted(X_AXIS)) SERIAL_ERROR_MSG("SV04 477 reason=X_AXIS_NOT_TRUSTED");
+            if (!sv04_p1_t1_config_plausible()) SERIAL_ERROR_MSG("SV04 477 reason=X2_HOME_CONFIG_INVALID");
+            if (sv04_p1_t1_home_fail_mask()) SERIAL_ERROR_MSG("SV04 477 reason=X2_LOGICAL_PLAUSIBILITY_FAIL");
+            SERIAL_ERROR_MSG("SV04 469 G28: T1 gate failed; X1 homing refused");''',1)
+          # Stand 477 is a measurement build, NOT a bypass of the X2 guard.
+          assert 'if (!sv04_p1_x_failed) {' in s
+          assert 'SV04 477 reason=X2_COMPLETION_FALSE' in s
+          assert 'SV04 477: PRECHECK_CONFIG_FAIL' in s
+          assert s.count('homeaxis(X_AXIS);') >= 2
+          p.write_text(s)
+          print('SV04_477_READONLY_DIAGNOSTIC_INSTRUMENTATION=PASS')
+          PY_477
+          sha256sum /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp > evidence/477_instrumented_g28.sha256
+          printf 'G28_FAIL_CLOSED=YES\nX1_BYPASS=NO\nCALIBRATION_TOL_MM=0.50\nFLASH_ALLOWED=NO\n' > evidence/477_safety.txt
+      - name: SV04 478 identifiable M115 and read-only M119 G28 snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_478'
+          from pathlib import Path
+          root=Path('/tmp/sv04_474_full/Marlin/src')
+          p115=root/'gcode/host/M115.cpp'
+          p119=root/'gcode/host/M119.cpp'
+          g28=root/'gcode/calibrate/G28.cpp'
+          m115=p115.read_text()
+          m119=p119.read_text()
+          assert m115.count('void GcodeSuite::M115() {')==1
+          assert m119.count('void GcodeSuite::M119() {')==1
+          assert 'SV04-NEXT-478' not in m115
+          assert 'SV04 478 G28' not in m119
+          assert 'SV04 477 reason=X2_COMPLETION_FALSE' in g28.read_text()
+          m115=m115.replace('void GcodeSuite::M115() {',
+                            'void GcodeSuite::M115() {\n  SERIAL_ECHOLNPGM("SV04-NEXT-478 G28_DIAGNOSTICS READ_ONLY_M119 VERSION_ID=478");',1)
+          # M119 reports the saved G28 result and preflight logical values without moving steppers.
+          m119=m119.replace('#include "../../module/endstops.h"',
+                            '#include "../../module/endstops.h"\n#include "../../inc/MarlinConfig.h"\n#include "../../module/motion.h"',1)
+          m119=m119.replace('  endstops.report_states();', '''  endstops.report_states();
+          
+            #if ENABLED(DUAL_X_CARRIAGE) && ENABLED(BLTOUCH) && ENABLED(Z_SAFE_HOMING)
+              // Snapshot is SOFTWARE STATE ONLY; not an independent proof of carriage clearance.
+              // seq=0 means no G28 has been recorded since the last reboot.
+              extern uint8_t sv04_p1_t1_home_fail_mask();
+              extern bool sv04_p1_t1_config_plausible();
+              SERIAL_ECHOLNPGM("SV04 478: DIAGNOSTICS_READ_ONLY=1");
+              SERIAL_ECHOLNPGM("SV04 478: g28_seq=", sv04_p1_g28_result.seq);
+              SERIAL_ECHOLNPGM("SV04 478: g28_completed=", int(sv04_p1_g28_result.completed));
+              SERIAL_ECHOLNPGM("SV04 478: g28_ok=", int(sv04_p1_g28_result.ok));
+              SERIAL_ECHOLNPGM("SV04 478: x_attempted=", int(sv04_p1_g28_result.x_attempted));
+              SERIAL_ECHOLNPGM("SV04 478: x2_gate_ok=", int(sv04_p1_g28_result.t1_ok));
+              SERIAL_ECHOLNPGM("SV04 478: x1_gate_ok=", int(sv04_p1_g28_result.t0_ok));
+              SERIAL_ECHOLNPGM("SV04 478: z_attempted=", int(sv04_p1_g28_result.z_attempted));
+              SERIAL_ECHOLNPGM("SV04 478: z_ok=", int(sv04_p1_g28_result.z_ok));
+              SERIAL_ECHOLNPGM("SV04 478: x2_completion_flag_current=", int(sv04_p1_t1_x_completed));
+              SERIAL_ECHOLNPGM("SV04 478: x2_config_plausible_current=", int(sv04_p1_t1_config_plausible()));
+              SERIAL_ECHOLNPGM("SV04 478: x2_logical_fail_mask_current=", int(sv04_p1_t1_home_fail_mask()));
+              SERIAL_ECHOLNPGM("SV04 478: inactive_x_bookkeeping_mm=", inactive_extruder_x);
+              SERIAL_ECHOLNPGM("SV04 478: axis_x_trusted_current=", int(axis_is_trusted(X_AXIS)));
+              SERIAL_ECHOLNPGM("SV04 478: results_are_not_physical_endstop_proof=1");
+            #endif''',1)
+          assert m119.count('SV04 478: g28_seq=')==1
+          assert m119.count('endstops.report_states();')==1
+          p115.write_text(m115)
+          p119.write_text(m119)
+          print('SV04_478_M115_VERSION_MARKER=PASS')
+          print('SV04_478_M119_READ_ONLY_SNAPSHOT=PASS')
+          PY_478
+          sha256sum /tmp/sv04_474_full/Marlin/src/gcode/host/M115.cpp /tmp/sv04_474_full/Marlin/src/gcode/host/M119.cpp /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp > evidence/478_diagnostics_sources.sha256
+          printf 'SV04_NEXT=478\nM115_IDENTIFIABLE=YES\nM119_SOFTWARE_G28_SNAPSHOT=YES\nX1_GATE_BYPASS=NO\nFLASH_ALLOWED=NO\n' > evidence/478_diagnostics.txt
+      - name: SV04 479 consistent firmware version in DWIN display and M115
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_479'
+          from pathlib import Path
+          root=Path('/tmp/sv04_474_full/Marlin')
+          version=root/'src/inc/Version.h'
+          config=root/'Configuration.h'
+          m115=root/'src/gcode/host/M115.cpp'
+          dwin=root/'src/lcd/e3v2/creality/LCD_RTS.cpp'
+          g28=root/'src/gcode/calibrate/G28.cpp'
+          motion=root/'src/module/motion.cpp'
+          v=version.read_text(); c=config.read_text(); m=m115.read_text()
+          d=dwin.read_text(); g=g28.read_text(); mm=motion.read_text()
+          # Both display code paths already use SOFTVERSION, backed by SHORT_BUILD_VERSION.
+          assert c.count('#define SOFTVERSION     SHORT_BUILD_VERSION')==1
+          assert d.count('RTS_SndData(SOFTVERSION, PRINTER_VERSION_TEXT_VP);')==2
+          assert '#define SHORT_BUILD_VERSION "V1.1.0"' in v
+          v=v.replace('#define SHORT_BUILD_VERSION "V1.1.0"', '#define SHORT_BUILD_VERSION "SV04-NEXT-479"', 1)
+          # M115 must print a unique version as the first line and keep capabilities.
+          assert m.count('SV04-NEXT-478 G28_DIAGNOSTICS READ_ONLY_M119 VERSION_ID=478')==1
+          m=m.replace('SV04-NEXT-478 G28_DIAGNOSTICS READ_ONLY_M119 VERSION_ID=478',
+                      'SV04-NEXT-479 G28_GUARDED DWIN_VERSION=479 M119_DIAG=ON',1)
+          # Defensive proof: new 468/469 gate corrects old 463 hard-coded-home behavior.
+          # Do NOT disable the gate or change its maximum permissible tolerance.
+          assert 'fabsf(inactive_extruder_x - hx) > float(SV04_T1_CALIBRATION_TOL_MM)' in mm
+          assert 'fabsf(hx - float(SV04_T1_CALIBRATED_HOME_MM)) <= float(SV04_T1_CALIBRATION_TOL_MM)' in mm
+          assert 'if (!sv04_p1_x_failed) {' in g
+          assert 'SV04 477 reason=X2_COMPLETION_FALSE' in g
+          assert 'SV04 478: g28_seq=' in (root/'src/gcode/host/M119.cpp').read_text()
+          assert 'SV04 469 G28: T1 gate failed; X1 homing refused' in g
+          assert 'static_assert(SV04_T1_CALIBRATION_TOL_MM >= 0.0f && SV04_T1_CALIBRATION_TOL_MM <= 0.50f' in g
+          version.write_text(v);m115.write_text(m)
+          assert 'SV04-NEXT-479' in version.read_text() and 'SV04-NEXT-479' in m115.read_text()
+          print('VERSION_479_DWIN=SOURCE_VERIFIED')
+          print('VERSION_479_M115=SOURCE_VERIFIED')
+          print('X2_365_35_WINDOW=SOURCE_VERIFIED')
+          print('X1_COLLISION_GATE_PRESERVED=PASS')
+          PY_479
+          sha256sum /tmp/sv04_474_full/Marlin/src/inc/Version.h /tmp/sv04_474_full/Marlin/Configuration.h /tmp/sv04_474_full/Marlin/src/gcode/host/M115.cpp /tmp/sv04_474_full/Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp /tmp/sv04_474_full/Marlin/src/module/motion.cpp /tmp/sv04_474_full/Marlin/src/gcode/calibrate/G28.cpp > evidence/479_identity_and_gate.sha256
+          printf 'SV04_NEXT=479\nDWIN_TEXT_VERSION=SV04-NEXT-479\nM115_VERSION=SV04-NEXT-479\nX2_CONFIG_HISTORIC_365_35_ACCEPTED=YES\nX1_BYPASS=NO\nFLASH_ALLOWED=NO\n' > evidence/479_report.txt
+      - name: SV04 480 version identity 479 to 480 (no logic change)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_480'
+          from pathlib import Path
+          root=Path('/tmp/sv04_474_full/Marlin/src')
+          v=root/'inc/Version.h'; m=root/'gcode/host/M115.cpp'
+          vt=v.read_text(); mt=m.read_text()
+          assert vt.count('#define SHORT_BUILD_VERSION "SV04-NEXT-479"')==1
+          assert mt.count('SV04-NEXT-479 G28_GUARDED DWIN_VERSION=479 M119_DIAG=ON')==1
+          vt=vt.replace('"SV04-NEXT-479"','"SV04-NEXT-480"',1)
+          mt=mt.replace('SV04-NEXT-479 G28_GUARDED DWIN_VERSION=479 M119_DIAG=ON','SV04-NEXT-480 G28_GUARDED DWIN_VERSION=480 M119_DIAG=ON',1)
+          v.write_text(vt); m.write_text(mt)
+          for p in root.rglob('*'):
+              if p.suffix in ('.h','.cpp') and 'SV04-NEXT-479' in p.read_text(errors='ignore'):
+                  raise SystemExit('stale 479 marker left in '+str(p))
+          print('VERSION_480_SOURCE=PASS')
+          PY_480
+          sha256sum /tmp/sv04_474_full/Marlin/src/inc/Version.h /tmp/sv04_474_full/Marlin/src/gcode/host/M115.cpp > evidence/480_identity.sha256
+      - name: SV04 480 real-source gate test (positive, negative, mutants)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sv04_480_test
+          cat > /tmp/sv04_480_test/gate_test.py <<'PY_GATE'
+          #!/usr/bin/env python3
+          """SV04 480: real-source differential gate test (motion.cpp text -> g++), positive + negative + mutants."""
+          import sys, subprocess, pathlib, re, tempfile
+          src = pathlib.Path(sys.argv[1]); work = pathlib.Path(sys.argv[2]); work.mkdir(parents=True, exist_ok=True)
+          t = src.read_text().split('\n')
+          a = next(i for i, l in enumerate(t) if 'float x_home_pos(const uint8_t extruder)' in l)
+          e = next(i for i in range(a, a + 30) if t[i] == '  }')
+          c = next(i for i, l in enumerate(t) if '#ifndef SV04_T1_CALIBRATED_HOME_MM' in l)
+          b = next(i for i, l in enumerate(t) if 'bool sv04_p1_t1_home_plausible()' in l)
+          seg = '\n'.join(t[a:e + 1] + t[c:b + 1]) + '\n'
+          NAN = 'NAN'
+          # (name, hotend_offset[1].x, inactive_extruder_x, expected fail mask, expected plausible)
+          CASES = [
+           ('P1 OEM 362', 362, 362, 0), ('P2 EEPROM 365.35', 365.35, 365.35, 0), ('P3 offset 0 -> 362', 0, 362, 0),
+           ('P4 window upper 365.85', 365.85, 365.85, 0), ('P5 window lower 364.85', 364.85, 364.85, 0),
+           ('N1 365.90', 365.90, 365.90, 4), ('N2 364.80', 364.80, 364.80, 4), ('N3 363.0', 363.0, 363.0, 4),
+           ('N4 inactive off by 0.6', 365.35, 364.75, 32), ('N5 NaN offset -> default 362, inactive 365.35', NAN, 365.35, 32),
+           ('N6 inactive NaN', 365.35, NAN, 1 | 16 | 32), ('N7 negative offset -> 362, inactive 0', -5, 0, 32),
+           ('N8 inactive below X2_MIN', 365.35, -1.0, 16 | 32), ('N9 offset 200 (OEM trim outside window)', 200, 200, 4),
+           ('N10 +Inf offset', 'INFINITY', 365.35, 4 | 32),
+          ]
+          def build(segtext, tag):
+              body = ''.join('  chk("%s",%s,%s,%d);\n' % (n, o, i, m) for n, o, i, m in CASES)
+              cpp = r'''#include <math.h>
+          #include <stdio.h>
+          #include <stdint.h>
+          #define X2_MIN_POS 0
+          #define X2_MAX_POS 362
+          #define X2_HOME_POS X2_MAX_POS
+          #define X_HOME_POS (-62)
+          struct P{float x;}; static P hotend_offset[2]; static float inactive_extruder_x;
+          using std::isfinite; using std::isnan;
+          ''' .replace('using std::isfinite; using std::isnan;', '') + segtext + r'''
+          static int bad=0;
+          static void chk(const char*n,float off,float inact,int exp){hotend_offset[1].x=off;inactive_extruder_x=inact;
+           int m=sv04_p1_t1_home_fail_mask(); bool pl=sv04_p1_t1_home_plausible(); bool ok=(m==exp)&&(pl==(exp==0)); if(!ok)bad++;
+           printf("%s mask=%d exp=%d %s\n",n,m,exp,ok?"OK":"FAIL");}
+          int main(){
+          ''' + body + '  printf("BAD=%d\\n",bad); return bad?1:0;}\n'
+              f = work / (tag + '.cpp'); f.write_text(cpp)
+              r = subprocess.run(['g++', '-std=gnu++14', '-w', '-o', str(work / tag), str(f)], capture_output=True, text=True)
+              if r.returncode: return 99, r.stderr[:2000]
+              r = subprocess.run([str(work / tag)], capture_output=True, text=True)
+              return r.returncode, r.stdout
+          rc, out = build(seg, 'real')
+          print(out.strip().split('\n')[-1], '(real source, %d cases)' % len(CASES))
+          if rc: print(out); print('GATE480_RESULT FAIL real source'); sys.exit(1)
+          # mutants must be detected (rc==1 means a test failed = killed; 99 = invalid)
+          MUT = {
+           'M1 tolerance 0.50->1.50 (window widened)': ('SV04_T1_CALIBRATION_TOL_MM 0.50f', 'SV04_T1_CALIBRATION_TOL_MM 1.50f'),
+           'M2 config check always true': ('if (!sv04_p1_t1_config_plausible()) m |= 4;', ''),
+           'M3 inactive check removed': ('fabsf(inactive_extruder_x - hx) > float(SV04_T1_CALIBRATION_TOL_MM)', '0'),
+           'M4 home above T0 removed': ('if (!(hx > x_home_pos(0))) m |= 8;', ''),
+           'M5 calibrated home 365.35->366.50': ('SV04_T1_CALIBRATED_HOME_MM 365.35f', 'SV04_T1_CALIBRATED_HOME_MM 366.50f'),
+          }
+          killed = 0
+          EQUIV = {'M4 home above T0 removed'}   # dead condition: hx >= X2_MIN_POS(0) already implies hx > X_HOME_POS(-62)
+          for n, (o, nw) in MUT.items():
+              assert seg.count(o) >= 1, 'mutation anchor missing: ' + n
+              r, o2 = build(seg.replace(o, nw), 'mut%d' % (len(n) * 7 + killed))
+              if r == 1: print('KILLED ' + n); killed += 1
+              elif r == 99 and 'static assertion' in o2: print('KILLED (compile-time static_assert) ' + n); killed += 1
+              elif r == 0 and n in EQUIV: print('EQUIVALENT (proven: dead condition) ' + n); killed += 1
+              else: print('SURVIVED/INVALID(%d) %s' % (r, n))
+          if killed != len(MUT): print('GATE480_RESULT FAIL mutants'); sys.exit(1)
+          print('GATE480_RESULT PASS cases=%d mutants_killed=%d' % (len(CASES), killed))
+          PY_GATE
+          python3 -I /tmp/sv04_480_test/gate_test.py /tmp/sv04_474_full/Marlin/src/module/motion.cpp /tmp/sv04_480_test/w | tee evidence/gate480_test.log
+          grep -Fq 'GATE480_RESULT PASS' evidence/gate480_test.log
+      - name: 482 - verify and fix random-bin.py in isolated source tree only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY_NAMEFIX'
+          from pathlib import Path
+          import hashlib, re, secrets
+          p=Path('/tmp/sv04_474_full/buildroot/share/PlatformIO/scripts/random-bin.py')
+          old=p.read_text()
+          assert "datetime.now().strftime(\"firmware\")" in old, 'Baseline generator changed: audit required'
+          assert old.count("env['PROGNAME']") == 1, 'Unexpected generator mutation'
+          new = '# SV04 NEXT 482: Unique 8.3-safe output name\nImport("env")\nimport secrets\nenv["PROGNAME"] = "SV" + secrets.token_hex(3).upper()\n'
+          # Independently check syntax and 50 generated names before writing.
+          compile(new, str(p), 'exec')
+          names=[]
+          for _ in range(50):
+              env={}
+              def Import(symbol): assert symbol == 'env'
+              exec(compile(new, str(p), 'exec'), {'env':env, 'Import':Import})
+              name=env['PROGNAME']
+              assert re.fullmatch(r'SV[0-9A-F]{6}', name)
+              names.append(name)
+          assert len(set(names)) == len(names), 'Unexpected name collision in test batch'
+          p.write_text(new)
+          print('ORIGINAL_RANDOM_BIN_SHA256='+hashlib.sha256(old.encode()).hexdigest())
+          print('PATCHED_RANDOM_BIN_SHA256='+hashlib.sha256(new.encode()).hexdigest())
+          print('UNIQUE_FILENAME_TESTS=PASS 50/50')
+          Path('evidence/namefix482_test.txt').write_text('UNIQUE_FILENAME_TESTS=PASS 50/50\\nSOURCE_ONLY_PATCH=random-bin.py\\n')
+          PY_NAMEFIX
+          test -s evidence/namefix482_test.txt
+      - name: Install PlatformIO
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user platformio==6.1.18
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run preserved native tests from 470
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -Wall -Wextra -Werror /tmp/sv04_474_full/SV04_NEXT_474_NATIVE_TEST.cpp -o /tmp/sv04_474_native
+          /tmp/sv04_474_native | tee evidence/native_470.log
+      - name: Build STM32 480 code with 482 unique BIN naming and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          pio run -d /tmp/sv04_474_full -e STM32F103RET6_creality 2>&1 | tee evidence/stm32_480.log
+          BUILDDIR=/tmp/sv04_474_full/.pio/build/STM32F103RET6_creality
+          mapfile -t BINFILES < <(find "$BUILDDIR" -maxdepth 1 -type f -name '*.bin' | sort)
+          test "${#BINFILES[@]}" -eq 1 || { printf 'EXPECTED_ONE_BIN, GOT=%s\n' "${#BINFILES[@]}" >&2; exit 1; }
+          B="${BINFILES[0]}"
+          test -s "$B"
+          test "$(basename "$B")" != 'firmware.bin'
+          python3 - "$(basename "$B")" <<'PY_VERIFYNAME'
+          import re,sys
+          assert re.fullmatch(r'SV[0-9A-F]{6}\.bin',sys.argv[1]),sys.argv[1]
+          print('BUILD_UNIQUE_NAME=PASS',sys.argv[1])
+          PY_VERIFYNAME
+          printf '%s\n' "$(basename "$B")" > evidence/firmware_output_name.txt
+          H=$(sha256sum "$B" | cut -c1-8)
+          OUT=evidence/SV04_NEXT_482_PACKAGING_480CODE_${H}_NOT_APPROVED_FOR_FLASH.bin
+          cp "$B" "$OUT"
+          sha256sum "$OUT" > evidence/firmware.sha256
+          # Identity gate: the BIN itself must carry 480 and no stale marker; no 463 diagnostic text may be present.
+          N480=$(strings -n 8 "$OUT" | grep -c 'SV04-NEXT-480' || true)
+          test "$N480" -ge 3
+          ! strings -n 8 "$OUT" | grep -Eq 'SV04-NEXT-47[0-9]'
+          ! strings -n 8 "$OUT" | grep -Fq 'SV04 P1 463'
+          strings -n 8 "$OUT" | grep -Fq 'SV04 469 G28: T1 gate failed; X1 homing refused'
+          strings -n 8 "$OUT" | grep -Fq 'SV04 469 G28: X2 configuration rejected before motion'
+          strings -n 8 "$OUT" | grep -E 'FIRMWARE_NAME|SV04-NEXT-480|Compiled' > evidence/bin_identity_strings.txt
+          printf 'BIN_IDENTITY_480=PASS\nBIN_FILE=%s\nBIN_SHA256=%s\nFLASH_ALLOWED=NO\nHARDWARE_TESTED=NO\nG28_OK=NO\nBUILD_480_CODE_WITH_482_NAMEFIX=PASS\n' "$(basename "$OUT")" "$(sha256sum "$OUT" | cut -d' ' -f1)" > evidence/STATUS.txt
+      - name: Upload diagnostics on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_482_NAMEFIX_BUILD_AND_DIAGNOSTICS_NO_FLASH
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
