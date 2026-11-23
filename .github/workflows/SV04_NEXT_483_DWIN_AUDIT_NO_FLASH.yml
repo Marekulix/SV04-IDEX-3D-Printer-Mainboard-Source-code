@@ -1,0 +1,61 @@
+name: SV04 NEXT 483 DWIN VP AND HMI SOURCE AUDIT NO FLASH
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch external DWIN source
+        run: |
+          git clone --depth 1 https://github.com/johncarlson21/SV04-Touchscreen.git /tmp/sv04-display
+      - name: Audit address definitions and check authentic assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sv04-audit
+          cat > /tmp/sv04-audit/audit_dwin.py <<'PY_AUDIT'
+          #!/usr/bin/env python3
+          """Read-only DWIN <-> Marlin static compatibility audit. Never creates flash assets."""
+          from pathlib import Path
+          from collections import defaultdict
+          import re,json,hashlib,sys
+          
+          root=Path(sys.argv[1])
+          upstream=Path(sys.argv[2]) if len(sys.argv)>2 else None
+          header=(root/'Marlin/src/lcd/e3v2/creality/LCD_RTS.h').read_text(errors='replace')
+          source=(root/'Marlin/src/lcd/e3v2/creality/LCD_RTS.cpp').read_text(errors='replace')
+          rows=[]
+          for line in header.splitlines():
+              m=re.match(r'\s*#define\s+(\w+)\s+(0[xX][0-9A-Fa-f]+)\b',line)
+              if m and (m.group(1).endswith('_VP') or m.group(1) in {'Screen_Version_VP'}):
+                  rows.append({'symbol':m.group(1),'address':int(m.group(2),16),'code_references':len(re.findall(r'\b'+re.escape(m.group(1))+r'\b',source))})
+          by_addr=defaultdict(list)
+          for row in rows:by_addr[row['address']].append(row['symbol'])
+          collisions=[{'address':f'0x{addr:04X}','symbols':names} for addr,names in by_addr.items() if len(names)>1]
+          missing=[r['symbol'] for r in rows if r['code_references']==0]
+          readme={'audit':'SV04 DWIN 483 read-only','source_header_sha256':hashlib.sha256(header.encode()).hexdigest(),'source_cpp_sha256':hashlib.sha256(source.encode()).hexdigest(),'vp_definitions':len(rows),'duplicate_exact_vp_addresses':collisions,'unreferenced_vp_symbols':missing,'mainboard_source_is_480':False,'flash_approved':False,'physical_display_tested':False}
+          if upstream:
+              dwin=upstream/'DWIN_SET'
+              expected=['13TouchFile.bin','14ShowFile.bin','22_Config.bin']
+              readme['upstream_dwin_assets']={'exists':dwin.is_dir(),'files':sum(1 for x in dwin.rglob('*') if x.is_file()) if dwin.is_dir() else 0,'missing_required':[n for n in expected if not (dwin/n).is_file()],'hmi_project_present':(upstream/'DWprj.hmi').is_file()}
+          readme['manual_hmi_address_validation_required']=True
+          readme['known_safe_markers']={x:x in source for x in ['RTS_Mesh_4x4_Update','SV04 DWIN: EEPROM save denied','SV04 DWIN: G28 X denied']}
+          print(json.dumps(readme,indent=2,ensure_ascii=False))
+          (root/'DWIN_483_AUDIT.json').write_text(json.dumps(readme,indent=2,ensure_ascii=False)+'\n')
+          (root/'DWIN_483_VP_MAP.csv').write_text('symbol,address,source_references\n'+''.join(f"{r['symbol']},0x{r['address']:04X},{r['code_references']}\n" for r in rows))
+          if collisions:sys.exit('FAIL: duplicate exact VP addresses; manual investigation required')
+          PY_AUDIT
+          python3 /tmp/sv04-audit/audit_dwin.py "$GITHUB_WORKSPACE" /tmp/sv04-display
+          mv DWIN_483_AUDIT.json DWIN_483_VP_MAP.csv /tmp/sv04-audit/
+          printf 'NO_FLASH=YES\nHMI_BINARY_NOT_MODIFIED=YES\nHMI_VP_OBJECTS_NOT_YET_VALIDATED=YES\n' > /tmp/sv04-audit/STATUS.txt
+      - name: Upload evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SV04_NEXT_483_DWIN_AUDIT_NO_FLASH
+          path: /tmp/sv04-audit/
+          if-no-files-found: warn
